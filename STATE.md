@@ -9,14 +9,17 @@
 Public best at hand-over: 0.467 (public notebooks), LB #1 0.504.
 
 ## GPU ledger (owner: 19 h available at 2026-10-25 17:00 UTC)
-| kernel / version | started (UTC) | hours | notes |
-|---|---|---|---|
-| casmi26-final v2 | 16:03 | ~1.5 | V1 submission notebook |
-| casmi26-train-xenc v1 | after molfeat | <= 5.5 | cross-encoder xenc_v1 (max_hours 5.3) |
+| kernel / version | started (UTC) | ended (UTC) | GPU h | notes |
+|---|---|---|---|---|
+| casmi26-final v2 | 2026-10-25 16:03 | 17:09 | 1.1 | V1 submission notebook (65 min) |
+| casmi26-train-xenc v1 | 17:29 | 17:53 | 0.4 | crashed at init (self.type name clash) - fixed |
+| casmi26-train-xenc v2 | 17:54 | running | <= 5.5 | cross-encoder xenc_v1, max_hours 5.3, 8 epochs x 5000 steps |
+Used so far: ~1.5 h. Remaining: ~17.5 h (keep 2 h reserve for final kernels).
 
-## Running at hand-over
-- casmi26-molfeat v1 (CPU) -> then casmi26-train-xenc v1 is pushed automatically by the local PC watcher (if the PC was off, push it yourself: `./kag.sh push k_train_xenc`).
-- casmi26-final v2 -> submitted as V1 by the local watcher once complete (check `./kag.sh subs`).
+## Running at hand-over (2026-10-25 18:20 UTC) — the hourly routine owns the queue from now on
+- casmi26-train-xenc v2 (GPU) — when COMPLETE: read its log (per-epoch `[epN EMA] MRR@25 on truth + same-formula lists`, columns xenc vs fp_ll) and follow queue item 1 in CLOUD_AGENT.md.
+- V1 submission 57637669 (casmi26-final v2) — public score pending; record it above when it appears and compute the ratio (LB / val estimate 0.599).
+- The owner's PC may also be on with read-only watchers; it will not push kernels or submit.
 
 ## Model results (validation, class-2 MRR@25 unless noted)
 | model | S1 | S2 | S3 | notes |

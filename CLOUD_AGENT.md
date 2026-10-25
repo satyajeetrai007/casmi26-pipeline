@@ -56,3 +56,11 @@ Known calibration: the public LB moves far less than validation; first own submi
 - Kaggle images are Python 3.13 without RDKit: kernels install `metric/rdkit-2026-3-3-wheel` offline; the simulators need RDKit 2025.3.6 cp313 from `eveliaveldrine/rdkit-wheels`.
 - T4 memory: spectrum transformer bs 512 needs both T4s (DataParallel).
 - `kaggle kernels logs` only works after a run ends; `push` fails while two GPU sessions run (the helper retries).
+
+## How each hourly run works (routine)
+1. `git fetch origin`; if branch `agent-state` exists, work on it (`git checkout agent-state`), otherwise on `main`.
+2. Read this file, `STATE.md`, the end of `EXPERIMENTS.md`. Setup as above; verify `./kag.sh subs`.
+3. Poll every kernel listed as running in `STATE.md`; for finished ones read the log, record results (and GPU hours) and decide by the queue.
+4. Take only the next step(s) that do not depend on unfinished work. Never wait more than ~5 minutes in one run; never train on the cloud machine (no GPU).
+5. Commit what changed and push: `git push origin HEAD:main`, or `git push origin HEAD:agent-state` if main is rejected.
+6. If blocked (auth, quota, a crash you cannot fix confidently), write it under **Blocked** in `STATE.md`, commit, push and stop.
