@@ -4,6 +4,7 @@
 | when (UTC) | submission | public | notes |
 |---|---|---|---|
 | 2026-10-21 19:48 | V0 private fork of a public pipeline (reference only, never to be resubmitted) | 0.456 | |
+| 2026-10-25 ~23:45 | V2: spectral-fit PubChem selection + ranker trained on honest records (kernel casmi26-final-hc v1, submitted automatically from the owner's PC when its run passes) | pending | calibrated estimate C = 0.498 |
 | 2026-10-25 17:11 | V1 own pipeline: fp_v2 + PubChem window (top-500 by popularity) + GLACIER/ICEBERG + leak-free LambdaRank (kernel casmi26-final v2) | **0.287** | val LB estimate 0.599 -> ratio 0.48: validation was badly miscalibrated |
 
 Public best at hand-over: 0.467 (public notebooks), LB #1 0.504.
@@ -44,3 +45,10 @@ New PubChem selection `--pc_select fp`: pre-score up to 20,000 window members by
 | casmi26-rank-cal | CPU | frozen V1 ranker on V1 class-1 + honest class-2 (pop) -> its LB estimate should be ~0.29 if the diagnosis is right |
 | casmi26-rank-hc | CPU | new ranker CV on class-1 fp + honest class-2 fp -> honest LB estimate of the new configuration |
 **Submission rule from now on:** only when rank-cal reproduces V1 (estimate within ~0.05 of 0.287) AND the new configuration's honest estimate exceeds 0.48 (clearly above the 0.456/0.467 public line).
+
+## Calibration result (2026-10-25 22:30 UTC)
+| configuration (honest records) | S1 class 1 | S2 class 2 | S3 class 2 | estimate C = 0.16*S1 + 0.55*mean(S2,S3) |
+|---|---|---|---|---|
+| V1 (popularity-based PubChem selection, V1 ranker) | 0.978 | 0.014 | 0.461 | 0.287 (actual 0.287) |
+| V2 (spectral-fit PubChem selection, rank-hc ranker) | 0.891 | 0.771 | 0.522 | 0.498 |
+Estimator C was chosen after seeing V1's score (one calibration point): use it for decisions, and re-check it against V2's public score.

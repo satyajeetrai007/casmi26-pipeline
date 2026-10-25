@@ -311,3 +311,11 @@ rank_variant('rank-cal', ['val_scores_c1.pkl', 'val_c2tp_pop.pkl'], ['gl_val_out
 # new ranker: CV on class-1 + honest class-2 records with spectral-fit PubChem selection
 rank_variant('rank-hc', ['val_c1_fp.pkl', 'val_c2tp_fp.pkl'], ['gl_c1_fp.pkl', 'gl_c2tp_fp.pkl'], '',
              ['casmi26-infer-hc-b', 'casmi26-infer-hc-c', 'casmi26-gl-hc-bc', 'casmi26-gl-hc-c'])
+
+# 15) V2 submission notebook: spectral-fit PubChem selection (infer_fp default --pc_select fp) + ranker trained on honest records (rank-hc)
+FINAL_HC_CMD = FINAL_CMD.replace("--mode test --out /content/work/test_scores.pkl", "--mode test --pc_select fp --out /content/work/test_scores.pkl")
+assert FINAL_HC_CMD != FINAL_CMD
+write_kernel(os.path.join(S, 'k_final-hc'), 'casmi26-final-hc', 'casmi26-final-hc',
+             [code(FINAL_SETUP)] + script_cells(['fpmodel.py', 'build_train_cache.py', 'fragscore.py', 'infer_fp.py', 'gl_val.py', 'rank_val.py', 'apply_ranker.py', 'xenc.py', 'molfeat.py', 'score_xenc.py']) + [code(FINAL_HC_CMD)], gpu=True,
+             kernel_sources=['satyajeetrai/casmi26-cpu-prep-cache-pools-baseline', 'satyajeetrai/casmi26-train-fp', 'satyajeetrai/casmi26-pop', 'satyajeetrai/casmi26-rank-hc'],
+             dataset_sources=DS + ['dmitriigluzdov/casmi26-pubchem-popularity-prior', 'ahmedberatozer/casmi26-iceberg', 'ahmedberatozer/casmi26-glacier', 'eveliaveldrine/rdkit-wheels'])

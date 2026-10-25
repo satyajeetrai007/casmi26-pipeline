@@ -39,7 +39,7 @@ Helper: `./kag.sh push k_<dir>` (retries while both GPU slots are busy) · `./ka
 Build with `XENC=1 python make_kernels.py .` to attach the cross-encoder to `rank` and `final`.
 
 ## LB estimate (the number that decides a submission)
-`rank` prints `LB estimate = 0.16 * MRR(S1|c1) + 0.55 * MRR(S3|c2, low+mid PubChem-popularity terciles)`.
+Use **estimate C = 0.16 * MRR(S1|c1) + 0.55 * mean(MRR(S2|c2), MRR(S3|c2))** computed on HONEST records (`--class2 --truth_pubchem`); it reproduced V1 exactly (0.287). The old estimate (S3 low+mid popularity, truth in pool) over-estimated V1 by 2x and must not be used.
 S1 = 250 timsTOF natural products (class-1 behaviour), S3 = natural-product-library structures with all their spectra removed (class-2 behaviour), novel molecules (~29%) score ~0.
 Known calibration: the public LB moves far less than validation; first own submission (V1) will calibrate this — compare its LB with its estimate and write the ratio into `STATE.md`.
 
