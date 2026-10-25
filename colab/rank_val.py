@@ -7,11 +7,18 @@ import argparse, pickle, numpy as np, pandas as pd, lightgbm as lgb
 from fpmodel import formula_elements
 p = argparse.ArgumentParser(); p.add_argument('--scores', required=True); p.add_argument('--gl', default=''); p.add_argument('--out', default='ranker.pkl')
 p.add_argument('--seeds', type=int, default=3); p.add_argument('--mask_frac', type=float, default=0.0); p.add_argument('--rounds', type=int, default=500)
+p.add_argument('--apply', default='', help='evaluate a frozen ranker.pkl on these records instead of cross-validating')
 args = p.parse_args()
-R = pd.concat([pd.read_pickle(f) for f in args.scores.split(',')], ignore_index=True)
+FILES = args.scores.split(','); GLF = args.gl.split(',') if args.gl else []
+assert len(GLF) in (0, 1, len(FILES)), 'pass one --gl per --scores file (or a single one)'
+parts = []
+for i_, f_ in enumerate(FILES):
+    Ri = pd.read_pickle(f_); Ri['_gl'] = (i_ if len(GLF) == len(FILES) else 0) if GLF else -1; parts.append(Ri)
+R = pd.concat(parts, ignore_index=True)
 if 'class2' in R.columns:
     R['set'] = R['set'].astype(str) + np.where(R['class2'].fillna(False).astype(bool), '|c2', '|c1')
-GL = pd.read_pickle(args.gl) if args.gl else None
+GLS = [pd.read_pickle(g) for g in GLF]
+GL = GLS[0] if GLS else None
 rng = np.random.default_rng(0)
 POPCOLS = [c[4:] for c in R.columns if c.startswith('pop_')]
 
@@ -66,10 +73,11 @@ def build(R, mask_frac):
         if r.get('el_pred') is not None and np.ndim(r['el_pred']) == 1:
             E = np.stack([formula_elements(x) for x in forms]); d = E - np.asarray(r['el_pred'])[None, :]
             f['el_l1'] = np.abs(d).sum(1); f['el_l1_z'] = z(f.el_l1.values); f['el_c_err'] = d[:, 0]; f['el_n_err'] = d[:, 2]; f['el_o_err'] = d[:, 3]
-        if GL is not None:
+        GLr = GLS[int(r['_gl'])] if GLS and int(r['_gl']) >= 0 else None
+        if GLr is not None:
             smis = list(r['smiles'])
             for name in ('GL', 'ICE'):
-                d = GL.get(name, {}).get(r['id'], {}); v = np.array([d.get(s, np.nan) if d.get(s) is not None else np.nan for s in smis], np.float32)
+                d = GLr.get(name, {}).get(r['id'], {}); v = np.array([d.get(s, np.nan) if d.get(s) is not None else np.nan for s in smis], np.float32)
                 f[name.lower()] = v; f[name.lower() + '_z'] = z(np.nan_to_num(v, nan=np.nanmean(v) if np.isfinite(v).any() else 0.0)); f[name.lower() + '_has'] = np.isfinite(v).astype(int)
         rows.append(f)
     return pd.concat(rows, ignore_index=True)
@@ -94,6 +102,23 @@ def mrr_of(df, score, by='set'):
 
 print('baseline fused (ll+con) ', mrr_of(D, D.z_ll + D.z_con)); print('baseline ll            ', mrr_of(D, D.ll)); print('baseline con           ', mrr_of(D, D.con))
 if 'z_pop' in D: print('fused + 0.3 z_pop       ', mrr_of(D, D.z_ll + D.z_con + 0.3 * D.z_pop))
+def lb_estimate(D, pred):
+    m = mrr_of(D, pred); tp = D.groupby('qid').truth_pop.first(); pos = tp[tp > 0]
+    terc = pd.qcut(pos, 3, labels=['pop_low', 'pop_mid', 'pop_high']) if len(pos) >= 3 else pd.Series(dtype=object)
+    D = D.assign(pop_terc=np.where(D.qid.map(tp) > 0, D.qid.map(terc).astype(str), 'pop_zero')); byt = mrr_of(D, pred, by=['set', 'pop_terc'])
+    c1 = m.get('S1|c1', np.nan); c2_all = m.get('S3|c2', np.nan); c2_lm = np.nanmean([byt.get('S3|c2|pop_low', np.nan), byt.get('S3|c2|pop_mid', np.nan)])
+    print('MRR by set:', m); print('by set x truth-popularity:', byt)
+    print(f'LB estimate A (0.16*S1|c1 + 0.55*S3|c2 low/mid pop): {0.16 * np.nan_to_num(c1) + 0.55 * c2_lm:.4f} | B (0.16*S1|c1 + 0.55*S3|c2 all): {0.16 * np.nan_to_num(c1) + 0.55 * c2_all:.4f}')
+
+
+if args.apply:
+    rk = pickle.load(open(args.apply, 'rb'))
+    for f_ in rk['feats']:
+        if f_ not in D.columns: D[f_] = np.nan
+    pred_a = np.mean([lgb.Booster(model_str=s_).predict(D[rk['feats']]) for s_ in rk['boosters']], 0)
+    print('=== frozen ranker', args.apply, 'on', args.scores); lb_estimate(D, pred_a)
+    print('=== fused (ll+con) on the same records'); lb_estimate(D, (D.z_ll + D.z_con).values)
+    print('RANK DONE'); raise SystemExit(0)
 qids = D.qid.unique(); rng.shuffle(qids); folds = np.array_split(qids, 5)
 pred = np.zeros(len(D)); boosters = []
 params = dict(objective='lambdarank', metric='ndcg', eval_at=[25], learning_rate=0.03, num_leaves=15, min_data_in_leaf=40, feature_fraction=0.8, bagging_fraction=0.8, bagging_freq=1, lambda_l2=1.0, verbose=-1, lambdarank_truncation_level=30)
@@ -104,7 +129,7 @@ for fi, fq in enumerate(folds):
         bst = lgb.train({**params, 'seed': seed}, lgb.Dataset(Dtr[feats], Dtr.label, group=grp_tr), num_boost_round=args.rounds)
         pred[te] += bst.predict(D.loc[te, feats]) / args.seeds; boosters.append(bst)
     print(f'fold {fi} done', flush=True)
-print('ranker (5-fold CV)      ', mrr_of(D, pred))
+print('ranker (5-fold CV)      ', mrr_of(D, pred)); lb_estimate(D, pred)
 # honest class-2 view: masked queries (truth treated as PubChem-only) split by how documented the truth is in PubChem
 tp = D.groupby('qid').truth_pop.first(); terc = pd.qcut(tp[tp > 0], 3, labels=['pop_low', 'pop_mid', 'pop_high'])
 D['pop_terc'] = D.qid.map(terc).astype(str); D['pop_terc'] = np.where(D.qid.map(tp) > 0, D.pop_terc, 'pop_zero')

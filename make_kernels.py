@@ -264,3 +264,48 @@ print(subprocess.run(cmd, shell=True, capture_output=True, text=True).stdout)
 """
 write_kernel(os.path.join(S, 'k_xenc_val'), 'casmi26-xenc-val', 'casmi26-xenc-val', [code(XV_SETUP)] + script_cells(['fpmodel.py', 'xenc.py', 'molfeat.py', 'score_xenc.py']) + [code(XV_CMD)], gpu=True,
              kernel_sources=['satyajeetrai/casmi26-cpu-prep-cache-pools-baseline', 'satyajeetrai/casmi26-infer-fp', 'satyajeetrai/casmi26-train-xenc'])
+
+# 13) honest-validation inference variants (CPU, run in parallel)
+def infer_variant(slug, jobs):
+    cmd = "import os, subprocess, shutil\nshutil.copy(find('val_queries_seed0.pkl'), '/content/work/val_queries_seed0.pkl')\n"
+    for extra, out in jobs:
+        cmd += f"print(subprocess.run(f\"cd /content/work && python -u infer_fp.py --ckpt {{os.environ['CKPT']}} {extra} --out /kaggle/working/{out} 2>&1 | tail -12\", shell=True, capture_output=True, text=True).stdout)\n"
+    cells = [code(INFER_SETUP)] + script_cells(['fpmodel.py', 'build_train_cache.py', 'fragscore.py', 'infer_fp.py']) + [code(cmd)]
+    write_kernel(os.path.join(S, 'k_' + slug), 'casmi26-' + slug, 'casmi26-' + slug, cells, gpu=False,
+                 kernel_sources=['satyajeetrai/casmi26-cpu-prep-cache-pools-baseline', 'satyajeetrai/casmi26-train-fp', 'satyajeetrai/casmi26-pop'],
+                 dataset_sources=DS + ['dmitriigluzdov/casmi26-pubchem-popularity-prior'])
+infer_variant('infer-hc-a', [('--mode val --class2 --truth_pubchem --pc_select pop', 'val_c2tp_pop.pkl')])
+infer_variant('infer-hc-b', [('--mode val --class2 --truth_pubchem --pc_select fp', 'val_c2tp_fp.pkl')])
+infer_variant('infer-hc-c', [('--mode val --pc_select fp', 'val_c1_fp.pkl'), ('--mode test --pc_select fp --sub /kaggle/working/submission_fused.csv', 'test_scores_fp.pkl')])
+
+# 14) simulator scores for the honest-validation records (GPU) and ranker variants (CPU)
+GLX_SETUP = GL_SETUP.replace("shutil.copy(find('val_queries_seed0.pkl'), '/content/work/val_queries_seed0.pkl'); shutil.copy(find('val_scores_c2.pkl'), '/content/work/val_scores_c2.pkl'); shutil.copy(find('test_scores.pkl'), '/content/work/test_scores.pkl')",
+                             "shutil.copy(find('val_queries_seed0.pkl'), '/content/work/val_queries_seed0.pkl')")
+assert GLX_SETUP != GL_SETUP
+def gl_variant(slug, src_kernel, jobs):
+    cmd = "import os, subprocess, shutil\n"
+    for mode, f, out, budget in jobs:
+        cmd += f"shutil.copy(find('{f}'), '/content/work/{f}')\n"
+        cmd += (f"print(subprocess.run(f\"cd /content/work && python -u gl_val.py --mode {mode} --scores /content/work/{f} --gl_pkg {{os.environ['GL_PKG']}} --ice_pkg {{os.environ['ICE_PKG']}} "
+                f"--wheels {{os.environ['ICE_WHEELS']}} --budget {budget} --top_n 40 --out /kaggle/working/{out} 2>&1 | grep -v -E 'chunk:|adj = torch' | tail -16\", shell=True, capture_output=True, text=True).stdout)\n")
+    write_kernel(os.path.join(S, 'k_' + slug), 'casmi26-' + slug, 'casmi26-' + slug, [code(GLX_SETUP)] + script_cells(['gl_val.py']) + [code(cmd)], gpu=True,
+                 kernel_sources=['satyajeetrai/casmi26-cpu-prep-cache-pools-baseline', 'satyajeetrai/' + src_kernel],
+                 dataset_sources=DS + ['ahmedberatozer/casmi26-iceberg', 'ahmedberatozer/casmi26-glacier', 'eveliaveldrine/rdkit-wheels'])
+gl_variant('gl-hc-a', 'casmi26-infer-hc-a', [('val', 'val_c2tp_pop.pkl', 'gl_c2tp_pop.pkl', 1800)])
+gl_variant('gl-hc-bc', 'casmi26-infer-hc-b', [('val', 'val_c2tp_fp.pkl', 'gl_c2tp_fp.pkl', 1800)])
+gl_variant('gl-hc-c', 'casmi26-infer-hc-c', [('val', 'val_c1_fp.pkl', 'gl_c1_fp.pkl', 1800), ('test', 'test_scores_fp.pkl', 'gl_test_fp.pkl', 1200)])
+
+def rank_variant(slug, files, gls, extra, sources):
+    setup = SETUP.replace("WORK = os.environ.get('CASMI_WORK', '/kaggle/working')", "WORK = '/kaggle/tmp/work'") + "\n"
+    for f in files + gls:
+        setup += f"shutil.copy(find('{f}'), '/content/work/{f}')\n"
+    cmd = (f"import subprocess\nprint(subprocess.run(\"cd /content/work && python -u rank_val.py --scores {','.join(files)} --gl {','.join(gls)} {extra} --out /kaggle/working/ranker.pkl 2>&1 | tail -45\", "
+           "shell=True, capture_output=True, text=True).stdout)\n")
+    write_kernel(os.path.join(S, 'k_' + slug), 'casmi26-' + slug, 'casmi26-' + slug, [code(setup)] + script_cells(['fpmodel.py', 'rank_val.py']) + [code(cmd)], gpu=False,
+                 kernel_sources=['satyajeetrai/casmi26-cpu-prep-cache-pools-baseline'] + ['satyajeetrai/' + s for s in sources])
+# calibration: the frozen V1 ranker (casmi26-rank v5 output) on V1-style class-1 records + honest class-2 records with V1's PubChem selection
+rank_variant('rank-cal', ['val_scores_c1.pkl', 'val_c2tp_pop.pkl'], ['gl_val_out.pkl', 'gl_c2tp_pop.pkl'], '--apply /content/work/ranker_v1.pkl',
+             ['casmi26-infer-fp', 'casmi26-gl-val', 'casmi26-infer-hc-a', 'casmi26-gl-hc-a', 'casmi26-rank'])
+# new ranker: CV on class-1 + honest class-2 records with spectral-fit PubChem selection
+rank_variant('rank-hc', ['val_c1_fp.pkl', 'val_c2tp_fp.pkl'], ['gl_c1_fp.pkl', 'gl_c2tp_fp.pkl'], '',
+             ['casmi26-infer-hc-b', 'casmi26-infer-hc-c', 'casmi26-gl-hc-bc', 'casmi26-gl-hc-c'])

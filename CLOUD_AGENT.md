@@ -44,10 +44,11 @@ S1 = 250 timsTOF natural products (class-1 behaviour), S3 = natural-product-libr
 Known calibration: the public LB moves far less than validation; first own submission (V1) will calibrate this — compare its LB with its estimate and write the ratio into `STATE.md`.
 
 ## Experiment queue (top first; update this list as results come in)
-1. **xenc_v1** (running at hand-over): when `train-xenc` completes, compare per-epoch `xenc` vs `fp_ll` MRR on same-formula lists in its log. If xenc beats fp_ll on S1 and S3 by > 0.03: push `xenc-val` -> `XENC=1` `rank` -> if the LB estimate beats the current best estimate by > 0.01, `XENC=1` `final` -> submit.
-2. If xenc helps: a second run `xenc_v2` resumed for more epochs (set env `XENC_RESUME=1` when building so the kernel attaches its own previous output; ~5 h GPU). If it does not help after 2 epochs of evidence, stop it.
-3. Honest class-2 check: add `--truth_pubchem` to `infer_fp.py` (validation truth removed from the pool and re-entered only through the PubChem window with its PubChem SMILES) and re-run `rank`; if the estimate drops a lot, representation differences between training SMILES and PubChem SMILES are inflating validation — then standardise all candidate SMILES identically (largest fragment, uncharge, canonical tautomer) before fingerprinting.
-4. Fine-tune the GLACIER weights on timsTOF training spectra (needs fragment-DAG labels; large effort, only if 1–3 are done).
+0. **V1 scored 0.287 against a validation estimate of 0.599.** Read "Diagnosis of V1" in `STATE.md`. Until `casmi26-rank-cal` has reproduced V1's score, no validation number is trusted and nothing is submitted. The calibration chain is driven from the owner's PC; just record its results when the kernels finish (`./kag.sh logs casmi26-rank-cal 45`, `./kag.sh logs casmi26-rank-hc 50`).
+1. **xenc_v1** (train-xenc v2, running): when it completes, compare per-epoch `xenc` vs `fp_ll` on same-formula lists in its log. If xenc wins by > 0.03 on S1 and S3, score the *honest* records with it (needs an xenc-val variant on `val_c1_fp.pkl` + `val_c2tp_fp.pkl`, add it to `make_kernels.py` like `infer_variant`), then re-run `rank-hc` with the xenc scores.
+2. If the honest estimate of the best configuration > 0.48: build a `final` variant with `--pc_select fp` (and xenc if used) plus the `rank-hc` ranker, check the commit run, submit once.
+3. If xenc helps: `xenc_v2` resumed for more epochs (env `XENC_RESUME=1` when building; ~5 h GPU). If it does not help after 2 epochs of evidence, stop it.
+4. Fine-tune GLACIER on timsTOF training spectra (large effort; only after 1-3).
 
 ## Pitfalls already paid for (read before changing features)
 - Validation truths are always **training structures**; class-2 test answers never are. Any feature revealing train membership leaks: pool source flags, PubChem depositor bit 1 (spectral library), the COCONUT membership bit (the public COCONUT file excludes train structures). They are removed; keep them out.

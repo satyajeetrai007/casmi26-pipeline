@@ -14,6 +14,8 @@ p.add_argument('--val_queries', default='/content/work/val_queries_seed0.pkl'); 
 p.add_argument('--pubchem_top', type=int, default=500); p.add_argument('--w_con', type=float, default=1.0); p.add_argument('--keep', type=int, default=150)
 p.add_argument('--test_path', default='/content/data/comp/test.parquet'); p.add_argument('--nproc', type=int, default=3); p.add_argument('--frag_top', type=int, default=40)
 p.add_argument('--limit', type=int, default=0); p.add_argument('--class2', action='store_true', help='val: remove ALL library spectra of the truth structure (class-2 simulation)')
+p.add_argument('--truth_pubchem', action='store_true', help='val: also remove the truth from the pool so it can only re-enter through the PubChem window (test-like class 2)')
+p.add_argument('--pc_select', default='fp', choices=['fp', 'pop']); p.add_argument('--pc_pop_union', type=int, default=100); p.add_argument('--pc_cap', type=int, default=20000)
 args = p.parse_args()
 dev = 'cuda' if torch.cuda.is_available() else 'cpu'; t0 = time.time()
 CACHE = '/content/work/cache'; POOLS = '/content/work/pools'
@@ -159,7 +161,26 @@ def score_arrays(pb, pm, e, bits_packed, maccs_packed, cnt):
     return ll.cpu().numpy(), con.cpu().numpy(), yb
 
 
-def pubchem_window(target, exclude_keys):
+def fp_bits_worker(smiles_list):
+    """Morgan r2 4096 packed bits only (fast pre-screen of a whole PubChem window)."""
+    from rdkit import Chem, RDLogger
+    from rdkit.Chem import rdFingerprintGenerator
+    RDLogger.DisableLog('rdApp.*'); gen = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=4096)
+    out = np.zeros((len(smiles_list), 512), np.uint8); ok = np.zeros(len(smiles_list), bool)
+    for j, s in enumerate(smiles_list):
+        try:
+            m = Chem.MolFromSmiles(s)
+            if m is None: continue
+            out[j] = np.packbits(gen.GetFingerprintAsNumPy(m).astype(np.uint8)); ok[j] = True
+        except Exception:
+            pass
+    return out, ok
+
+
+def pubchem_window(target, exclude_keys, pb=None):
+    """PubChem-only candidates of the mass window. --pc_select fp (default): pre-score up to --pc_cap window members by
+    fingerprint log-likelihood and keep the best (pubchem_top - pc_pop_union) plus the pc_pop_union most documented;
+    --pc_select pop: the pubchem_top most documented (V1 behaviour)."""
     lo, hi = np.searchsorted(pc_mass, [target * (1 - args.ppm * 1e-6), target * (1 + args.ppm * 1e-6)])
     if hi <= lo:
         return None
@@ -170,8 +191,25 @@ def pubchem_window(target, exclude_keys):
     pop = np.zeros(len(idx), np.float32)
     for n in ('lsid', 'lpmid', 'lpatent'):
         if n in PCPOP: pop += np.asarray(PCPOP[n][idx]).astype(np.float32)
-    sel = np.argsort(-pop, kind='stable')[:args.pubchem_top]; idx, keys = idx[sel], keys[sel]
-    smiles = [bytes(pc_smi[pc_off[i]:pc_off[i + 1]]).decode() for i in idx]
+    if args.pc_select == 'fp' and pb is not None and len(idx) > args.pubchem_top:
+        if len(idx) > args.pc_cap:                                   # very large windows: keep the most documented cap
+            o = np.argsort(-pop, kind='stable')[:args.pc_cap]; idx, keys, pop = idx[o], keys[o], pop[o]
+        smi_all = [bytes(pc_smi[pc_off[i]:pc_off[i + 1]]).decode() for i in idx]
+        fr = POOL_MP.map(fp_bits_worker, [smi_all[i:i + 400] for i in range(0, len(smi_all), 400)])
+        bits = np.concatenate([x[0] for x in fr]); okb = np.concatenate([x[1] for x in fr])
+        ll = np.full(len(idx), -1e9, np.float32)
+        with torch.no_grad():
+            for c0 in range(0, len(idx), 8192):
+                yb = torch.from_numpy(np.unpackbits(bits[c0:c0 + 8192], axis=1).astype(np.float32)).to(dev)
+                ll[c0:c0 + 8192] = fp_loglik(pb, yb).mean(0).cpu().numpy()
+        ll[~okb] = -1e9
+        n_fit = max(0, args.pubchem_top - args.pc_pop_union)
+        sel = list(dict.fromkeys(list(np.argsort(-ll, kind='stable')[:n_fit]) + list(np.argsort(-pop, kind='stable')[:args.pc_pop_union])))
+        sel = np.array(sel[:args.pubchem_top]); idx, keys = idx[sel], keys[sel]
+        smiles = [smi_all[i] for i in sel]
+    else:
+        sel = np.argsort(-pop, kind='stable')[:args.pubchem_top]; idx, keys = idx[sel], keys[sel]
+        smiles = [bytes(pc_smi[pc_off[i]:pc_off[i + 1]]).decode() for i in idx]
     feats = {n: np.asarray(PCPOP[n][idx]).astype(np.float32) for n in PCPOP}
     return dict(idx=idx, keys=keys, smiles=smiles, feats=feats, n_window=int(hi - lo))
 
@@ -191,7 +229,9 @@ results = []
 for qi, q in enumerate(queries):
     specs = q['specs']; nms = np.array([s['prec'] - ADDUCT_SHIFT.get(s['adduct'], np.nan) for s in specs]); target = float(np.nanmedian(nms))
     lo, hi = np.searchsorted(pm_sorted, [target * (1 - args.ppm * 1e-6), target * (1 + args.ppm * 1e-6)]); cidx = pm_order[lo:hi]
-    r = dict(id=q['id'], set=q.get('set'), key=q['key'], mass=target, n_pool=len(cidx), n_spec=len(specs))
+    if args.truth_pubchem and q['key'] is not None:
+        cidx = cidx[pool_key[cidx] != q['key']]
+    r = dict(id=q['id'], set=q.get('set'), key=q['key'], mass=target, n_pool=len(cidx), n_spec=len(specs), truth_pubchem=bool(args.truth_pubchem), pc_select=args.pc_select)
     libs = lib_search(specs, target, exclude_key=q['key'], exclude_lib=(None if args.class2 else q.get('lib')), exclude_idx=q['exclude']) if q['key'] is not None else lib_search(specs, target)
     r['class2'] = bool(args.class2)
     r['lib_top'] = max(libs.values()) if libs else 0.0
@@ -206,7 +246,7 @@ for qi, q in enumerate(queries):
             if col in POOL_POP.columns: popf[n] = POOL_POP[col].values[cidx].astype(np.float32)
     r['n_pubchem'] = 0
     if args.pubchem_top > 0:
-        w = pubchem_window(target, set(keys))
+        w = pubchem_window(target, set(keys), pb)
         if w is not None and len(w['keys']):
             r['n_pubchem'] = len(w['keys']); r['n_pubchem_window'] = w['n_window']
             chunks = [w['smiles'][i:i + 100] for i in range(0, len(w['smiles']), 100)]
