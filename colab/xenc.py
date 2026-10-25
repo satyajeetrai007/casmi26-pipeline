@@ -20,7 +20,7 @@ class XEnc(nn.Module):
         self.four = Fourier(64)
         self.frag_in = nn.Sequential(nn.Linear(128 * 4 + 2, d), nn.GELU(), nn.Linear(d, d))
         self.glob_in = nn.Sequential(nn.Linear(2048, d), nn.GELU(), nn.Linear(d, d))
-        self.type = nn.Embedding(3, d)
+        self.tok_type = nn.Embedding(3, d)
         layer = nn.TransformerDecoderLayer(d, heads, 4 * d, drop, activation='gelu', batch_first=True, norm_first=True)
         self.dec = nn.TransformerDecoder(layer, layers)
         self.norm = nn.LayerNorm(d)
@@ -41,7 +41,7 @@ class XEnc(nn.Module):
         rel = torch.stack([ia / P.clamp(min=1), ib / P.clamp(min=1)], -1)
         ftok = self.frag_in(torch.cat([self.four(ia), self.four(ib), self.four(P - ia), self.four(P - ib), rel], -1))
         gtok = self.glob_in(torch.log1p(cnt.float()) / 3.0)[:, :, None]   # [B, G, 1, d]
-        toks = torch.cat([gtok + self.type.weight[0], atok + self.type.weight[1], ftok + self.type.weight[2]], 2).reshape(B * G, 1 + A + Fm, d)
+        toks = torch.cat([gtok + self.tok_type.weight[0], atok + self.tok_type.weight[1], ftok + self.tok_type.weight[2]], 2).reshape(B * G, 1 + A + Fm, d)
         na = nn_[..., 0].long().reshape(B * G); nf = nn_[..., 1].long().reshape(B * G)
         ar = torch.arange(A, device=mz.device)[None]; fr = torch.arange(Fm, device=mz.device)[None]
         tmask = torch.cat([torch.zeros(B * G, 1, dtype=torch.bool, device=mz.device), ar >= na[:, None], fr >= nf[:, None]], 1)
