@@ -1,0 +1,13 @@
+# generated kernel folders and all data / outputs: never commit competition data, model weights or keys
+k_*/
+out/
+*.pkl
+*.pt
+*.npy
+*.parquet
+*.csv
+*.zip
+*.json.key
+kaggle*.json
+access_token
+__pycache__/

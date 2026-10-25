@@ -1,0 +1,266 @@
+"""Build Kaggle kernel folders (notebook + kernel-metadata.json) from the scripts in colab/.
+usage: python make_kernels.py <scratchpad_dir>
+"""
+import json, os, sys
+S = sys.argv[1]
+SRC = os.path.join(S, 'colab')
+COMP = 'enveda-CASMI26-molecule-id-mass-spectra'
+DS = ['prvsiyan/coconut-casmi26-candidates', 'franciscoangulo/casmi26-pubchemlite-cc0-candidate-fingerprints',
+      'sergiomalv/casmi-chebi-lmsd-structures', 'ahmedberatozer/casmi26-pubchem-tier', 'metric/rdkit-2026-3-3-wheel']
+
+SETUP = r'''import os, glob, subprocess, shutil, time
+T0 = time.time()
+def find(pat):
+    h = sorted(glob.glob(f'/kaggle/input/**/{pat}', recursive=True), key=len)
+    assert h, pat
+    return h[0]
+def link(dst, src):
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    if os.path.islink(dst) or os.path.exists(dst):
+        return
+    os.symlink(src, dst)
+os.makedirs('/content/data/ds', exist_ok=True)
+link('/content/data/comp', os.path.dirname(find('sample_submission.csv')))
+for slug, f in [('coconut-casmi26-candidates', 'coco_meta.pkl'), ('casmi26-pubchemlite-cc0-candidate-fingerprints', 'pubchemlite_meta.pkl'),
+                ('casmi-chebi-lmsd-structures', 'bio_meta.pkl'), ('casmi26-pubchem-tier', 'pc_mass.npy')]:
+    link(f'/content/data/ds/{slug}', os.path.dirname(find(f)))
+WORK = os.environ.get('CASMI_WORK', '/kaggle/working'); os.makedirs(WORK, exist_ok=True); link('/content/work', WORK)
+os.chdir('/content/work'); os.environ['NPROC'] = str(max(2, os.cpu_count() - 1))
+try:
+    import rdkit
+except ImportError:
+    import sys
+    tag = f'cp{sys.version_info.major}{sys.version_info.minor}'
+    whl = sorted(glob.glob(f'/kaggle/input/**/rdkit-2026.3.3-{tag}-*.whl', recursive=True)); assert whl, 'rdkit wheel'
+    subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-q', '--no-index', '--no-deps', whl[0]])
+import rdkit; print('rdkit', rdkit.__version__)
+print('cpus', os.cpu_count(), 'work', WORK); print(subprocess.run('nvidia-smi -L; free -g | head -2; df -h /kaggle/working /kaggle/tmp 2>/dev/null', shell=True, capture_output=True, text=True).stdout)
+'''
+
+
+def nb(cells):
+    return {"cells": cells, "metadata": {"kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"}, "language_info": {"name": "python"}},
+            "nbformat": 4, "nbformat_minor": 5}
+
+
+def code(src):
+    return {"cell_type": "code", "metadata": {}, "source": src, "outputs": [], "execution_count": None}
+
+
+def script_cells(names):
+    out = []
+    for n in names:
+        s = open(os.path.join(SRC, n), encoding='utf-8').read()
+        out.append(code(f'%%writefile /content/work/{n}\n' + s))
+    return out
+
+
+def write_kernel(folder, kid, title, cells, gpu, kernel_sources=(), dataset_sources=DS):
+    os.makedirs(folder, exist_ok=True)
+    json.dump(nb(cells), open(os.path.join(folder, 'kernel.ipynb'), 'w', encoding='utf-8'), indent=1)
+    meta = {"id": f"satyajeetrai/{kid}", "title": title, "code_file": "kernel.ipynb", "language": "python", "kernel_type": "notebook",
+            "is_private": True, "enable_gpu": gpu, "enable_tpu": False, "enable_internet": False, "dataset_sources": list(dataset_sources),
+            "competition_sources": [COMP], "kernel_sources": list(kernel_sources), "model_sources": []}
+    json.dump(meta, open(os.path.join(folder, 'kernel-metadata.json'), 'w'), indent=1)
+    print('wrote', folder)
+
+
+# 1) CPU prep kernel: cache + pools + baseline -> outputs in /kaggle/working
+cpu_cells = [code(SETUP)] + script_cells(['build_train_cache.py', 'build_pools.py', 'casmi_val.py', 'val_baseline.py']) + [
+    code('!cd /content/work && python -u build_train_cache.py 2>&1 | tail -8'),
+    code('!cd /content/work && python -u build_pools.py 2>&1 | grep -v chunk | tail -12'),
+    code('!cd /content/work && python -u val_baseline.py 2>&1 | tee val_baseline.log | tail -40'),
+    code('!rm -rf /content/work/__pycache__; du -sh /kaggle/working/*; ls -la /kaggle/working/cache /kaggle/working/pools'),
+]
+write_kernel(os.path.join(S, 'k_cpu_prep'), 'casmi26-cpu-prep-cache-pools-baseline', 'casmi26-cpu-prep-cache-pools-baseline', cpu_cells, gpu=False)
+
+# 2) GPU training kernel: caches from the prep kernel's output
+GPU_SETUP = SETUP.replace("WORK = os.environ.get('CASMI_WORK', '/kaggle/working')", "WORK = '/kaggle/tmp/work'") + r'''
+link('/content/work/cache', os.path.dirname(find('peaks_mz.npy'))); link('/content/work/pools', os.path.dirname(find('pool.parquet')))
+shutil.copy(find('val_queries_seed0.pkl'), '/content/work/val_queries_seed0.pkl')
+os.makedirs('/kaggle/working/runs', exist_ok=True); link('/content/work/runs', '/kaggle/working/runs')
+prev = sorted(glob.glob('/kaggle/input/**/runs/*/last.pt', recursive=True))
+print('previous checkpoints', prev)
+'''
+TRAIN_CMD = r'''import os, glob, subprocess
+RUN = 'fp_v2'; init = sorted(glob.glob('/kaggle/input/**/runs/fp_v1/ema.pt', recursive=True)); prev = sorted(glob.glob(f'/kaggle/input/**/runs/{RUN}/last.pt', recursive=True))
+resume = f' --resume {prev[0]}' if prev else (f' --init {init[0]}' if init else '')
+cmd = f'cd /content/work && PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python -u train_fp.py --out runs/{RUN} --epochs 5 --bs 512 --steps_per_epoch 6000 --lr 1.5e-4 --np_boost 3.0 --max_hours 4.3{resume} 2>&1 | tee -a runs/{RUN}/stdout.log'
+print(cmd); os.makedirs(f'/content/work/runs/{RUN}', exist_ok=True)
+subprocess.run(cmd, shell=True)
+print(open(f'/content/work/runs/{RUN}/log.txt').read()[-6000:])
+'''
+gpu_cells = [code(GPU_SETUP)] + script_cells(['fpmodel.py', 'casmi_val.py', 'train_fp.py']) + [code(TRAIN_CMD), code('!ls -la /kaggle/working/runs/*; du -sh /kaggle/working')]
+write_kernel(os.path.join(S, 'k_train_fp'), 'casmi26-train-fp', 'casmi26-train-fp', gpu_cells, gpu=True, kernel_sources=['satyajeetrai/casmi26-cpu-prep-cache-pools-baseline', 'satyajeetrai/casmi26-train-fp'])
+
+# 3) inference kernel: prep outputs + trained model -> submission.csv (no internet)
+INFER_SETUP = SETUP.replace("WORK = os.environ.get('CASMI_WORK', '/kaggle/working')", "WORK = '/kaggle/tmp/work'") + r"""
+link('/content/work/cache', os.path.dirname(find('peaks_mz.npy'))); link('/content/work/pools', os.path.dirname(find('pool.parquet')))
+ck = sorted(glob.glob('/kaggle/input/**/runs/*/ema.pt', recursive=True), key=len); print('checkpoints', ck)
+os.environ['CKPT'] = ck[0]
+"""
+INFER_CMD = r"""import os, subprocess, pandas as pd, shutil
+shutil.copy(find('val_queries_seed0.pkl'), '/content/work/val_queries_seed0.pkl')
+for extra, out in (('', 'val_scores_c1.pkl'), (' --class2', 'val_scores_c2.pkl')):
+    cmd = f"cd /content/work && python -u infer_fp.py --ckpt {os.environ['CKPT']} --mode val{extra} --out /kaggle/working/{out} 2>&1 | tail -15"
+    print(subprocess.run(cmd, shell=True, capture_output=True, text=True).stdout)
+cmd = f"cd /content/work && python -u infer_fp.py --ckpt {os.environ['CKPT']} --mode test --out /kaggle/working/test_scores.pkl --sub /kaggle/working/submission.csv 2>&1 | tail -15"
+print(subprocess.run(cmd, shell=True, capture_output=True, text=True).stdout)
+sub = pd.read_csv('/kaggle/working/submission.csv'); print(sub.shape, sub.smiles.str.count(';').describe()); assert sub.molecule_id.is_unique and sub.smiles.notna().all()
+"""
+infer_cells = [code(INFER_SETUP)] + script_cells(['fpmodel.py', 'build_train_cache.py', 'fragscore.py', 'infer_fp.py']) + [code(INFER_CMD)]
+write_kernel(os.path.join(S, 'k_infer_fp'), 'casmi26-infer-fp', 'casmi26-infer-fp', infer_cells, gpu=False,   # CPU: model inference on ~5k spectra is cheap
+             kernel_sources=['satyajeetrai/casmi26-cpu-prep-cache-pools-baseline', 'satyajeetrai/casmi26-train-fp', 'satyajeetrai/casmi26-pop'],
+             dataset_sources=DS + ['dmitriigluzdov/casmi26-pubchem-popularity-prior'])
+
+# 4) debug kernel: validation-set construction only
+DBG_SETUP = SETUP.replace("WORK = os.environ.get('CASMI_WORK', '/kaggle/working')", "WORK = '/kaggle/tmp/work'") + r"""
+link('/content/work/cache', os.path.dirname(find('peaks_mz.npy'))); link('/content/work/pools', os.path.dirname(find('pool.parquet')))
+"""
+DBG_CMD = r"""import pandas as pd, numpy as np, sys
+sys.path.insert(0, '/content/work')
+from casmi_val import *
+meta = load_meta(); pool = pd.read_parquet('/content/work/pools/pool.parquet', columns=['ik14', 'src_mask'])
+print(pool.src_mask.value_counts()); coco = pool.loc[(pool.src_mask & 2) > 0, 'ik14'].values; print('coco', len(coco), coco[:3])
+print(meta.ingest_lib.value_counts()); print('ok adducts', meta.adduct.isin(TEST_ADDUCTS).mean(), 'n_peaks>=3', (meta.n_peaks >= 3).mean())
+Q = build_sets(meta, seed=0, coconut_keys=coco); print(Q.groupby('set').size()); Q.to_pickle('/kaggle/working/val_queries_seed0.pkl')
+"""
+write_kernel(os.path.join(S, 'k_debug_sets'), 'casmi26-debug-sets', 'casmi26-debug-sets', [code(DBG_SETUP)] + script_cells(['casmi_val.py']) + [code(DBG_CMD)], gpu=False,
+             kernel_sources=['satyajeetrai/casmi26-cpu-prep-cache-pools-baseline'])
+
+# 5) GLACIER / ICEBERG re-scoring on the validation lists
+GL_SETUP = SETUP.replace("WORK = os.environ.get('CASMI_WORK', '/kaggle/working')", "WORK = '/kaggle/tmp/work'") + r"""
+link('/content/work/cache', os.path.dirname(find('peaks_mz.npy'))); link('/content/work/pools', os.path.dirname(find('pool.parquet')))
+shutil.copy(find('val_queries_seed0.pkl'), '/content/work/val_queries_seed0.pkl'); shutil.copy(find('val_scores_c2.pkl'), '/content/work/val_scores_c2.pkl'); shutil.copy(find('test_scores.pkl'), '/content/work/test_scores.pkl')
+# simulator packages: copy ICEBERG and replace its cp312 RDKit wheel by the cp313 one (Kaggle image is Python 3.13)
+import sys
+ICE_SRC = os.path.dirname(find('ice_runner.py')); GL_SRC = os.path.dirname(find('gl_runner.py'))
+ICE_PKG = '/kaggle/tmp/ice_pkg'; shutil.copytree(ICE_SRC, ICE_PKG, dirs_exist_ok=True)
+W = os.path.join(ICE_PKG, 'wheels'); tag = f'cp{sys.version_info.major}{sys.version_info.minor}'
+for w in glob.glob(os.path.join(W, 'rdkit-*')):
+    if tag not in w: os.remove(w)
+if not glob.glob(os.path.join(W, f'rdkit-*{tag}*')):
+    src = sorted(glob.glob(f'/kaggle/input/**/rdkit-2025.3.6-{tag}-*.whl', recursive=True)); assert src, 'need cp313 rdkit 2025.3.6 wheel'
+    shutil.copy(src[0], os.path.join(W, os.path.basename(src[0]) + '.ice'))
+print('wheels:', sorted(os.listdir(W)))
+os.environ['ICE_PKG'] = ICE_PKG; os.environ['GL_PKG'] = GL_SRC; os.environ['ICE_WHEELS'] = W
+"""
+GL_CMD = r"""import os, subprocess
+for mode, scores, out, budget in (('test', 'test_scores.pkl', 'gl_test_out.pkl', 1500), ('val', 'val_scores_c2.pkl', 'gl_val_out.pkl', 1800)):
+    cmd = f"cd /content/work && python -u gl_val.py --mode {mode} --scores /content/work/{scores} --gl_pkg {os.environ['GL_PKG']} --ice_pkg {os.environ['ICE_PKG']} --wheels {os.environ['ICE_WHEELS']} --budget {budget} --top_n 40 --out /kaggle/working/{out} 2>&1 | tail -30"
+    print(subprocess.run(cmd, shell=True, capture_output=True, text=True).stdout)
+"""
+write_kernel(os.path.join(S, 'k_gl_val'), 'casmi26-gl-val', 'casmi26-gl-val', [code(GL_SETUP)] + script_cells(['gl_val.py']) + [code(GL_CMD)], gpu=True,
+             kernel_sources=['satyajeetrai/casmi26-cpu-prep-cache-pools-baseline', 'satyajeetrai/casmi26-infer-fp'],
+             dataset_sources=DS + ['ahmedberatozer/casmi26-iceberg', 'ahmedberatozer/casmi26-glacier', 'eveliaveldrine/rdkit-wheels'])
+
+# 6) popularity join + PubChem windows (CPU)
+POP_SETUP = SETUP.replace("WORK = os.environ.get('CASMI_WORK', '/kaggle/working')", "WORK = '/kaggle/tmp/work'") + r"""
+link('/content/work/cache', os.path.dirname(find('peaks_mz.npy'))); link('/content/work/pools', os.path.dirname(find('pool.parquet')))
+shutil.copy(find('val_queries_seed0.pkl'), '/content/work/val_queries_seed0.pkl'); os.makedirs('/kaggle/working/pop', exist_ok=True); link('/content/work/pop', '/kaggle/working/pop')
+"""
+write_kernel(os.path.join(S, 'k_pop'), 'casmi26-pop', 'casmi26-pop', [code(POP_SETUP)] + script_cells(['casmi_val.py', 'build_pop.py']) + [code('!cd /content/work && python -u build_pop.py 2>&1 | tail -40')], gpu=False,
+             kernel_sources=['satyajeetrai/casmi26-cpu-prep-cache-pools-baseline'], dataset_sources=DS + ['dmitriigluzdov/casmi26-pubchem-popularity-prior'])
+
+# 7) ranker CV on validation lists (CPU)
+RANK_SETUP = SETUP.replace("WORK = os.environ.get('CASMI_WORK', '/kaggle/working')", "WORK = '/kaggle/tmp/work'") + r"""
+link('/content/work/cache', os.path.dirname(find('peaks_mz.npy'))); link('/content/work/pools', os.path.dirname(find('pool.parquet')))
+for f in ('val_scores_c1.pkl', 'val_scores_c2.pkl'):
+    xv = sorted(glob.glob(f'/kaggle/input/**/casmi26-xenc-val/**/{f}', recursive=True)); src = xv[0] if xv else find(f); print('using', src); shutil.copy(src, f'/content/work/{f}')
+gl = sorted(glob.glob('/kaggle/input/**/gl_val_out.pkl', recursive=True)); os.environ['GLARG'] = f' --gl {gl[0]}' if gl else ''
+"""
+RANK_CMD = r"""import os, subprocess
+cmd = f"cd /content/work && python -u rank_val.py --scores val_scores_c1.pkl,val_scores_c2.pkl{os.environ['GLARG']} --out /kaggle/working/ranker.pkl 2>&1 | tail -70"
+print(subprocess.run(cmd, shell=True, capture_output=True, text=True).stdout)
+"""
+write_kernel(os.path.join(S, 'k_rank'), 'casmi26-rank', 'casmi26-rank', [code(RANK_SETUP)] + script_cells(['fpmodel.py', 'rank_val.py']) + [code(RANK_CMD)], gpu=False,
+             kernel_sources=['satyajeetrai/casmi26-cpu-prep-cache-pools-baseline', 'satyajeetrai/casmi26-infer-fp', 'satyajeetrai/casmi26-gl-val'] + (['satyajeetrai/casmi26-xenc-val'] if os.environ.get('XENC') else []))
+
+# 8) submission kernel: apply the ranker to the test records (CPU, no internet)
+SUB_SETUP = SETUP.replace("WORK = os.environ.get('CASMI_WORK', '/kaggle/working')", "WORK = '/kaggle/tmp/work'") + r"""
+shutil.copy(find('test_scores.pkl'), '/content/work/test_scores.pkl'); shutil.copy(find('ranker.pkl'), '/content/work/ranker.pkl')
+gl = sorted(glob.glob('/kaggle/input/**/gl_test_out.pkl', recursive=True)); os.environ['GLARG'] = f' --gl {gl[0]}' if gl else ''; print('gl_test', gl[:1])
+"""
+SUB_CMD = r"""import os, subprocess, pandas as pd
+cmd = f"cd /content/work && python -u apply_ranker.py --scores test_scores.pkl --ranker ranker.pkl{os.environ['GLARG']} --out /kaggle/working/submission.csv --audit /kaggle/working/audit.csv 2>&1 | tail -20"
+print(subprocess.run(cmd, shell=True, capture_output=True, text=True).stdout)
+sub = pd.read_csv('/kaggle/working/submission.csv'); assert sub.molecule_id.is_unique and sub.smiles.notna().all() and (sub.smiles.str.count(';') <= 24).all(); print(sub.shape)
+"""
+write_kernel(os.path.join(S, 'k_submit'), 'casmi26-submit', 'casmi26-submit', [code(SUB_SETUP)] + script_cells(['fpmodel.py', 'rank_val.py', 'apply_ranker.py']) + [code(SUB_CMD)], gpu=False,
+             kernel_sources=['satyajeetrai/casmi26-infer-fp', 'satyajeetrai/casmi26-rank', 'satyajeetrai/casmi26-gl-val'])
+
+# 9) FINAL end-to-end submission kernel (GPU): test inference + simulators + ranker, all at run time on test.parquet
+FINAL_SETUP = SETUP.replace("WORK = os.environ.get('CASMI_WORK', '/kaggle/working')", "WORK = '/kaggle/tmp/work'") + r"""
+link('/content/work/cache', os.path.dirname(find('peaks_mz.npy'))); link('/content/work/pools', os.path.dirname(find('pool.parquet')))
+os.makedirs('/content/work/pop', exist_ok=True); shutil.copy(find('pool_pop.parquet'), '/content/work/pop/pool_pop.parquet')
+ck = sorted(glob.glob('/kaggle/input/**/runs/*/ema.pt', recursive=True), key=len); print('checkpoints', ck); os.environ['CKPT'] = ck[0]
+shutil.copy(find('ranker.pkl'), '/content/work/ranker.pkl')
+import sys
+ICE_SRC = os.path.dirname(find('ice_runner.py')); GL_SRC = os.path.dirname(find('gl_runner.py'))
+ICE_PKG = '/kaggle/tmp/ice_pkg'; shutil.copytree(ICE_SRC, ICE_PKG, dirs_exist_ok=True)
+W = os.path.join(ICE_PKG, 'wheels'); tag = f'cp{sys.version_info.major}{sys.version_info.minor}'
+for w in glob.glob(os.path.join(W, 'rdkit-*')):
+    if tag not in w: os.remove(w)
+if not glob.glob(os.path.join(W, f'rdkit-*{tag}*')):
+    src = sorted(glob.glob(f'/kaggle/input/**/rdkit-2025.3.6-{tag}-*.whl', recursive=True)); assert src, 'need cp313 rdkit 2025.3.6 wheel'
+    shutil.copy(src[0], os.path.join(W, os.path.basename(src[0]) + '.ice'))
+os.environ['ICE_PKG'] = ICE_PKG; os.environ['GL_PKG'] = GL_SRC; os.environ['ICE_WHEELS'] = W
+print('setup done', f'{time.time()-T0:.0f}s')
+"""
+FINAL_CMD = r"""import os, subprocess, pandas as pd, time
+T1 = time.time()
+def run(cmd):
+    print('>>', cmd[:160]); r = subprocess.run(cmd, shell=True, capture_output=True, text=True); print(r.stdout[-6000:]); print(r.stderr[-3000:] if r.returncode else ''); print(f'[{time.time()-T1:.0f}s]')
+run(f"cd /content/work && python -u infer_fp.py --ckpt {os.environ['CKPT']} --mode test --out /content/work/test_scores.pkl --sub /kaggle/working/submission_fused.csv 2>&1 | tail -8")
+run(f"cd /content/work && python -u gl_val.py --mode test --scores /content/work/test_scores.pkl --gl_pkg {os.environ['GL_PKG']} --ice_pkg {os.environ['ICE_PKG']} --wheels {os.environ['ICE_WHEELS']} --budget 3000 --top_n 40 --out /content/work/gl_test_out.pkl 2>&1 | grep -v -E 'chunk:|adj = torch' | tail -12")
+xk = sorted(__import__('glob').glob('/kaggle/input/**/runs/xenc_v*/ema.pt', recursive=True))
+if xk:
+    run(f"cd /content/work && python -u score_xenc.py --ckpt {xk[-1]} --mode test --scores /content/work/test_scores.pkl --outdir /content/work 2>&1 | tail -6")
+run("cd /content/work && python -u apply_ranker.py --scores test_scores.pkl --ranker ranker.pkl --gl gl_test_out.pkl --out /kaggle/working/submission.csv --audit /kaggle/working/audit.csv 2>&1 | tail -12")
+sub = pd.read_csv('/kaggle/working/submission.csv'); te = pd.read_parquet(find('test.parquet') if False else sorted(__import__('glob').glob('/kaggle/input/**/test.parquet', recursive=True), key=len)[0], columns=['molecule_id'])
+assert set(sub.molecule_id) == set(te.molecule_id.unique()) and sub.molecule_id.is_unique and sub.smiles.notna().all() and (sub.smiles.str.count(';') <= 24).all(), 'submission invalid'
+print('OK submission', sub.shape, f'total {time.time()-T1:.0f}s')
+"""
+write_kernel(os.path.join(S, 'k_final'), 'casmi26-final', 'casmi26-final',
+             [code(FINAL_SETUP)] + script_cells(['fpmodel.py', 'build_train_cache.py', 'fragscore.py', 'infer_fp.py', 'gl_val.py', 'rank_val.py', 'apply_ranker.py', 'xenc.py', 'molfeat.py', 'score_xenc.py']) + [code(FINAL_CMD)], gpu=True,
+             kernel_sources=['satyajeetrai/casmi26-cpu-prep-cache-pools-baseline', 'satyajeetrai/casmi26-train-fp', 'satyajeetrai/casmi26-pop', 'satyajeetrai/casmi26-rank'] + (['satyajeetrai/casmi26-train-xenc'] if os.environ.get('XENC') else []),
+             dataset_sources=DS + ['dmitriigluzdov/casmi26-pubchem-popularity-prior', 'ahmedberatozer/casmi26-iceberg', 'ahmedberatozer/casmi26-glacier', 'eveliaveldrine/rdkit-wheels'])
+
+# 10) molecule features for the cross-encoder (CPU)
+MF_SETUP = SETUP.replace("WORK = os.environ.get('CASMI_WORK', '/kaggle/working')", "WORK = '/kaggle/tmp/work'") + r"""
+link('/content/work/pools', os.path.dirname(find('pool.parquet'))); os.makedirs('/kaggle/working/molfeat', exist_ok=True); link('/content/work/molfeat', '/kaggle/working/molfeat')
+"""
+write_kernel(os.path.join(S, 'k_molfeat'), 'casmi26-molfeat', 'casmi26-molfeat', [code(MF_SETUP)] + script_cells(['molfeat.py', 'build_molfeat.py']) + [code('!cd /content/work && python -u build_molfeat.py 2>&1 | tail -8')], gpu=False,
+             kernel_sources=['satyajeetrai/casmi26-cpu-prep-cache-pools-baseline'])
+
+# 11) cross-encoder training (GPU)
+XT_SETUP = SETUP.replace("WORK = os.environ.get('CASMI_WORK', '/kaggle/working')", "WORK = '/kaggle/tmp/work'") + r"""
+link('/content/work/cache', os.path.dirname(find('peaks_mz.npy'))); link('/content/work/pools', os.path.dirname(find('pool.parquet'))); link('/content/work/molfeat', os.path.dirname(find('mf_atoms.npy')))
+shutil.copy(find('val_queries_seed0.pkl'), '/content/work/val_queries_seed0.pkl')
+os.makedirs('/kaggle/working/runs', exist_ok=True); link('/content/work/runs', '/kaggle/working/runs')
+"""
+XT_CMD = r"""import os, glob, subprocess
+RUN = os.environ.get('XRUN', 'xenc_v1'); init = sorted(glob.glob('/kaggle/input/**/fp_v2_ema.pt', recursive=True) + glob.glob('/kaggle/input/**/runs/fp_v2/ema.pt', recursive=True), key=len)
+prev = sorted(glob.glob(f'/kaggle/input/**/runs/{RUN}/last.pt', recursive=True)); resume = f' --resume {prev[0]}' if prev else ''
+print('init', init[:1], 'resume', prev[:1]); os.makedirs(f'/content/work/runs/{RUN}', exist_ok=True)
+cmd = f'cd /content/work && PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python -u train_xenc.py --init {init[0]} --out runs/{RUN} --epochs 8 --steps 5000 --bs 32 --group 16 --max_hours 5.3{resume} 2>&1 | tee -a runs/{RUN}/stdout.log | grep -v -E "step [0-9]*[1-9]000 |step [0-9]*500 " | tail -80'
+print(subprocess.run(cmd, shell=True, capture_output=True, text=True).stdout)
+print(open(f'/content/work/runs/{RUN}/log.txt').read()[-5000:])
+"""
+write_kernel(os.path.join(S, 'k_train_xenc'), 'casmi26-train-xenc', 'casmi26-train-xenc', [code(XT_SETUP)] + script_cells(['fpmodel.py', 'xenc.py', 'train_xenc.py']) + [code(XT_CMD)], gpu=True,
+             kernel_sources=['satyajeetrai/casmi26-cpu-prep-cache-pools-baseline', 'satyajeetrai/casmi26-molfeat'] + (['satyajeetrai/casmi26-train-xenc'] if os.environ.get('XENC_RESUME') else []),
+             dataset_sources=DS + ['satyajeetrai/casmi26-fp-v2-ema'])
+
+# 12) cross-encoder scoring of the validation records (GPU) -> val_scores_c1/c2.pkl with an 'xenc' column
+XV_SETUP = SETUP.replace("WORK = os.environ.get('CASMI_WORK', '/kaggle/working')", "WORK = '/kaggle/tmp/work'") + r"""
+link('/content/work/cache', os.path.dirname(find('peaks_mz.npy')))
+shutil.copy(find('val_queries_seed0.pkl'), '/content/work/val_queries_seed0.pkl')
+for f in ('val_scores_c1.pkl', 'val_scores_c2.pkl'): shutil.copy(find(f), f'/content/work/{f}')
+xk = sorted(glob.glob('/kaggle/input/**/runs/xenc_v*/ema.pt', recursive=True)); print('xenc', xk); os.environ['XCK'] = xk[-1]
+"""
+XV_CMD = r"""import os, subprocess
+cmd = f"cd /content/work && python -u score_xenc.py --ckpt {os.environ['XCK']} --mode val --scores /content/work/val_scores_c1.pkl,/content/work/val_scores_c2.pkl --outdir /kaggle/working 2>&1 | tail -20"
+print(subprocess.run(cmd, shell=True, capture_output=True, text=True).stdout)
+"""
+write_kernel(os.path.join(S, 'k_xenc_val'), 'casmi26-xenc-val', 'casmi26-xenc-val', [code(XV_SETUP)] + script_cells(['fpmodel.py', 'xenc.py', 'molfeat.py', 'score_xenc.py']) + [code(XV_CMD)], gpu=True,
+             kernel_sources=['satyajeetrai/casmi26-cpu-prep-cache-pools-baseline', 'satyajeetrai/casmi26-infer-fp', 'satyajeetrai/casmi26-train-xenc'])
