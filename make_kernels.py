@@ -299,6 +299,8 @@ def rank_variant(slug, files, gls, extra, sources):
     setup = SETUP.replace("WORK = os.environ.get('CASMI_WORK', '/kaggle/working')", "WORK = '/kaggle/tmp/work'") + "\n"
     for f in files + gls:
         setup += f"shutil.copy(find('{f}'), '/content/work/{f}')\n"
+    if '--apply' in extra:
+        setup += "shutil.copy(find('ranker.pkl'), '/content/work/ranker_v1.pkl')\n"
     cmd = (f"import subprocess\nprint(subprocess.run(\"cd /content/work && python -u rank_val.py --scores {','.join(files)} --gl {','.join(gls)} {extra} --out /kaggle/working/ranker.pkl 2>&1 | tail -45\", "
            "shell=True, capture_output=True, text=True).stdout)\n")
     write_kernel(os.path.join(S, 'k_' + slug), 'casmi26-' + slug, 'casmi26-' + slug, [code(setup)] + script_cells(['fpmodel.py', 'rank_val.py']) + [code(cmd)], gpu=False,
