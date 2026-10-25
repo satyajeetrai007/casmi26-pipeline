@@ -13,8 +13,10 @@ Public best at hand-over: 0.467 (public notebooks), LB #1 0.504.
 |---|---|---|---|---|
 | casmi26-final v2 | 2026-10-25 16:03 | 17:09 | 1.1 | V1 submission notebook (65 min) |
 | casmi26-train-xenc v1 | 17:29 | 17:53 | 0.4 | crashed at init (self.type name clash) - fixed |
-| casmi26-train-xenc v2 | 17:54 | running | <= 5.5 | cross-encoder xenc_v1, max_hours 5.3, 8 epochs x 5000 steps |
-Used so far: ~1.5 h. Remaining: ~17.5 h (keep 2 h reserve for final kernels).
+| casmi26-train-xenc v2 | 17:54 | 21:50 | 3.9 | cross-encoder xenc_v1: LOST to fp log-lik (S1 0.40 vs 0.65) -> killed |
+| casmi26-gl-hc-a | ~19:20 | ~20:00 | 0.6 | simulators on honest class-2 (pop) records |
+| casmi26-gl-hc-c / gl-hc-bc | 20:12 / pending | | ~0.7 each | simulators on class-1 fp + test fp / honest class-2 fp |
+Used so far: ~7.4 h (incl. running gl-hc). Remaining: ~11.6 h (keep 2 h reserve for final kernels).
 
 ## Running at hand-over (2026-10-25 18:20 UTC) — the hourly routine owns the queue from now on
 - casmi26-train-xenc v2 (GPU) — when COMPLETE: read its log (per-epoch `[epN EMA] MRR@25 on truth + same-formula lists`, columns xenc vs fp_ll) and follow queue item 1 in CLOUD_AGENT.md.
