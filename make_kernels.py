@@ -345,3 +345,8 @@ probe('probe3-pop', '--pubchem_top 500 --pc_select pop --lib_gate 0.8 --pop_w 0.
 # 18) library-token check (CPU): S1/S2/S3 pool-only fused retrieval with the np-examples token vs the enveda-180 token
 infer_variant('libtok', [('--mode val --pubchem_top 0 --frag_top 0', 'v_c1_np.pkl'), ('--mode val --pubchem_top 0 --frag_top 0 --np_lib_as enveda-180', 'v_c1_e180.pkl'),
                          ('--mode val --class2 --pubchem_top 0 --frag_top 0', 'v_c2_np.pkl'), ('--mode val --class2 --pubchem_top 0 --frag_top 0 --np_lib_as enveda-180', 'v_c2_e180.pkl')])
+
+# 19) score-decomposition probes (CPU, pool only, library gate 0.8 as in probe1): which score carries signal on the hidden test
+probe('probe4-ll', '--pubchem_top 0 --lib_gate 0.8 --sub_score ll')
+probe('probe5-con', '--pubchem_top 0 --lib_gate 0.8 --sub_score con')
+probe('probe6-prior', '--pubchem_top 0 --lib_gate 0.8 --sub_score prior')

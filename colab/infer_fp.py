@@ -16,6 +16,7 @@ p.add_argument('--test_path', default='/content/data/comp/test.parquet'); p.add_
 p.add_argument('--limit', type=int, default=0); p.add_argument('--class2', action='store_true', help='val: remove ALL library spectra of the truth structure (class-2 simulation)')
 p.add_argument('--truth_pubchem', action='store_true', help='val: also remove the truth from the pool so it can only re-enter through the PubChem window (test-like class 2)')
 p.add_argument('--pc_select', default='fp', choices=['fp', 'pop']); p.add_argument('--pc_pop_union', type=int, default=100); p.add_argument('--pc_cap', type=int, default=20000)
+p.add_argument('--sub_score', default='fused', choices=['fused', 'll', 'con', 'prior'], help='submission base score: fused, fingerprint log-lik only, contrastive only, or popularity prior only (spectrum-blind)')
 p.add_argument('--np_lib_as', default='', help="encode spectra whose library token is 'enveda-np-examples' as this library instead (its embedding is untrained when S1 is held out)")
 p.add_argument('--lib_gate', type=float, default=0.0, help='submission order: library matches with cosine >= gate go first (0 = off)'); p.add_argument('--pop_w', type=float, default=0.0, help='submission order: + pop_w * (ln(1+SID) + ln(1+PMID))')
 args = p.parse_args()
@@ -315,7 +316,10 @@ if args.sub:
         keys_, smis_ = list(r.get('keys', [])), list(r.get('smiles', []))
         if keys_:
             # submission order: fused spectral score + pop_w * (ln(1+substances) + ln(1+PubMed)) ; strong library matches first
-            sc = np.asarray(r['fused'], np.float64).copy()
+            if args.sub_score == 'prior':
+                sc = np.asarray(r['pop_lsid'], np.float64) + np.asarray(r['pop_lpmid'], np.float64)
+            else:
+                sc = np.asarray(r[args.sub_score], np.float64).copy()
             if args.pop_w > 0 and 'pop_lsid' in r:
                 sc += args.pop_w * (np.asarray(r['pop_lsid'], np.float64) + np.asarray(r['pop_lpmid'], np.float64))
             if args.lib_gate > 0:

@@ -58,7 +58,9 @@ Estimator C was chosen after seeing V1's score (one calibration point): use it f
 
 ## Diagnosis after V2 + probes (2026-10-27)
 - Own spectral retrieval alone (P1) = 0.226; the ranker + simulators add only ~+0.06-0.10 on top. The public engine alone reaches ~0.35, so the core spectrum model is the weak part, not the ranker.
-- Suspected bug under test (kernel casmi26-libtok, CPU): every enveda-np-examples structure is in the S1 holdout, so the `enveda-np-examples` library embedding of the spectrum model never trained, yet test inference encodes every hidden test spectrum with that token. Fix flag: `infer_fp.py --np_lib_as enveda-180`.
+- Library-token suspicion REFUTED (casmi26-libtok): encoding S1 spectra as `enveda-180` instead of `enveda-np-examples` drops S1 pool-only MRR 0.519 -> 0.427 (S2/S3 unchanged). Test inference keeps the np-examples token.
+- Adduct shift table and 10 ppm windows checked: correct.
+- Running (CPU, not submitted): casmi26-probe4-ll / probe5-con / probe6-prior = pool-only test submissions ordered by fingerprint log-lik only / contrastive only / popularity prior only (all with library gate 0.8). Compared with P1 (fused, 0.226) they show which score carries signal on the hidden test. Submitting them needs the owner's OK.
 
 ## Blocked
 - The hourly routine (trig_01KBQwDr1zjhQzNHjqMeUTjx) is PAUSED: its GitHub push fails with 403 "Resource not accessible by integration", so it could not record its V2 submission and the PC submitted V2 again. Do not re-enable until a test run can push.
