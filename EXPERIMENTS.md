@@ -10,4 +10,6 @@
 - 2026-10-25 **V1 own pipeline = 0.287 public** (validation estimate 0.599). Diagnosis in STATE.md.
 - 2026-10-25 honest class-2 records (truth removed from the pool, only reachable through the PubChem window, V1 popularity-based PubChem selection): fingerprint fused S3 0.21, +GLACIER/ICEBERG 0.26, S2 ~0.01 (vs 0.59-0.81 on the old validation) -> most class-2 answers never reach the candidate list.
 - 2026-10-25 **cross-encoder xenc_v1: dead end.** 8 epochs, 3.9 GPU-h; on truth + same-formula lists S1 0.40 / S2 0.69 / S3 0.55 vs the fingerprint log-likelihood 0.65 / 0.82 / 0.63. Killed, not tuned.
+- 2026-10-26 **V2 = 0.255 public** (estimate C 0.498): spectral-fit PubChem selection did not help on the hidden test; validation has now failed twice.
+- 2026-10-26 CPU diagnostic probes: P1 pool-only spectral 0.226, P2 +PubChem by popularity 0.184, P3 +popularity weight 0.215. Core spectral retrieval is the bottleneck.
 

@@ -16,6 +16,8 @@ p.add_argument('--test_path', default='/content/data/comp/test.parquet'); p.add_
 p.add_argument('--limit', type=int, default=0); p.add_argument('--class2', action='store_true', help='val: remove ALL library spectra of the truth structure (class-2 simulation)')
 p.add_argument('--truth_pubchem', action='store_true', help='val: also remove the truth from the pool so it can only re-enter through the PubChem window (test-like class 2)')
 p.add_argument('--pc_select', default='fp', choices=['fp', 'pop']); p.add_argument('--pc_pop_union', type=int, default=100); p.add_argument('--pc_cap', type=int, default=20000)
+p.add_argument('--np_lib_as', default='', help="encode spectra whose library token is 'enveda-np-examples' as this library instead (its embedding is untrained when S1 is held out)")
+p.add_argument('--lib_gate', type=float, default=0.0, help='submission order: library matches with cosine >= gate go first (0 = off)'); p.add_argument('--pop_w', type=float, default=0.0, help='submission order: + pop_w * (ln(1+SID) + ln(1+PMID))')
 args = p.parse_args()
 dev = 'cuda' if torch.cuda.is_available() else 'cpu'; t0 = time.time()
 CACHE = '/content/work/cache'; POOLS = '/content/work/pools'
@@ -131,6 +133,13 @@ def val_queries():
 
 
 queries = test_queries() if args.mode == 'test' else val_queries()
+if args.np_lib_as:
+    n_sw = 0
+    for q_ in queries:
+        for s_ in q_['specs']:
+            if s_['lib'] == 'enveda-np-examples':
+                s_['lib'] = args.np_lib_as; n_sw += 1
+    print('library token enveda-np-examples ->', args.np_lib_as, 'for', n_sw, 'spectra')
 if args.limit:
     queries = queries[:args.limit]
 print('queries', len(queries), f'{time.time()-t0:.0f}s', flush=True)
@@ -300,13 +309,23 @@ R = pd.DataFrame(results); R.to_pickle(args.out)
 if args.mode == 'val':
     print(R.groupby('set').agg(mrr=('rr', 'mean'), top1=('rr', lambda s: (s == 1).mean()), in_list=('truth_rank', lambda s: (s > 0).mean()), n_pool=('n_pool', 'median'), n_pc=('n_pubchem', 'median'), n=('rr', 'size')))
 if args.sub:
-    rows = []
+    rows = []; n_gate = 0
     for r in results:
         seen, out = set(), []
-        for k, s in zip(r.get('keys', []), r.get('smiles', [])):
+        keys_, smis_ = list(r.get('keys', [])), list(r.get('smiles', []))
+        if keys_:
+            # submission order: fused spectral score + pop_w * (ln(1+substances) + ln(1+PubMed)) ; strong library matches first
+            sc = np.asarray(r['fused'], np.float64).copy()
+            if args.pop_w > 0 and 'pop_lsid' in r:
+                sc += args.pop_w * (np.asarray(r['pop_lsid'], np.float64) + np.asarray(r['pop_lpmid'], np.float64))
+            if args.lib_gate > 0:
+                ls = np.asarray(r['libsc'], np.float64); g = ls >= args.lib_gate; n_gate += int(g.any())
+                sc = np.where(g, 1e6 + ls, sc)
+            o = np.argsort(-sc, kind='stable'); keys_ = [keys_[i] for i in o]; smis_ = [smis_[i] for i in o]
+        for k, s in zip(keys_, smis_):
             if k in seen: continue
             seen.add(k); out.append(s)
             if len(out) == 25: break
         rows.append(dict(molecule_id=r['id'], smiles=';'.join(out) if out else 'C'))
-    sub = pd.DataFrame(rows); sub.to_csv(args.sub, index=False); print('written', args.sub, len(sub))
+    sub = pd.DataFrame(rows); sub.to_csv(args.sub, index=False); print('written', args.sub, len(sub), '| molecules with a library match >= gate:', n_gate)
 print('INFER DONE', f'{time.time()-t0:.0f}s')

@@ -319,3 +319,29 @@ write_kernel(os.path.join(S, 'k_final-hc'), 'casmi26-final-hc', 'casmi26-final-h
              [code(FINAL_SETUP)] + script_cells(['fpmodel.py', 'build_train_cache.py', 'fragscore.py', 'infer_fp.py', 'gl_val.py', 'rank_val.py', 'apply_ranker.py', 'xenc.py', 'molfeat.py', 'score_xenc.py']) + [code(FINAL_HC_CMD)], gpu=True,
              kernel_sources=['satyajeetrai/casmi26-cpu-prep-cache-pools-baseline', 'satyajeetrai/casmi26-train-fp', 'satyajeetrai/casmi26-pop', 'satyajeetrai/casmi26-rank-hc'],
              dataset_sources=DS + ['dmitriigluzdov/casmi26-pubchem-popularity-prior', 'ahmedberatozer/casmi26-iceberg', 'ahmedberatozer/casmi26-glacier', 'eveliaveldrine/rdkit-wheels'])
+
+# 16) natural-product-likeness of the validation structures (CPU)
+NP_SETUP = SETUP.replace("WORK = os.environ.get('CASMI_WORK', '/kaggle/working')", "WORK = '/kaggle/tmp/work'") + r"""
+link('/content/work/pools', os.path.dirname(find('pool.parquet'))); shutil.copy(find('val_queries_seed0.pkl'), '/content/work/val_queries_seed0.pkl')
+"""
+write_kernel(os.path.join(S, 'k_np-subset'), 'casmi26-np-subset', 'casmi26-np-subset', [code(NP_SETUP)] + script_cells(['fpmodel.py', 'np_subset.py']) + [code('!cd /content/work && python -u np_subset.py 2>&1 | tail -12')], gpu=False,
+             kernel_sources=['satyajeetrai/casmi26-cpu-prep-cache-pools-baseline'])
+
+# 17) LB diagnostic probes (CPU submission notebooks; one component changes at a time)
+def probe(slug, extra):
+    cmd = ("import os, subprocess, pandas as pd, glob\n"
+           f"print(subprocess.run(f\"cd /content/work && python -u infer_fp.py --ckpt {{os.environ['CKPT']}} --mode test {extra} --frag_top 0 --out /content/work/test_probe.pkl --sub /kaggle/working/submission.csv 2>&1 | tail -6\", shell=True, capture_output=True, text=True).stdout)\n"
+           "sub = pd.read_csv('/kaggle/working/submission.csv'); te = pd.read_parquet(sorted(glob.glob('/kaggle/input/**/test.parquet', recursive=True), key=len)[0], columns=['molecule_id'])\n"
+           "assert set(sub.molecule_id) == set(te.molecule_id.unique()) and sub.molecule_id.is_unique and sub.smiles.notna().all() and (sub.smiles.str.count(';') <= 24).all(), 'submission invalid'\n"
+           "print('OK submission', sub.shape)\n")
+    cells = [code(INFER_SETUP)] + script_cells(['fpmodel.py', 'build_train_cache.py', 'fragscore.py', 'infer_fp.py']) + [code(cmd)]
+    write_kernel(os.path.join(S, 'k_' + slug), 'casmi26-' + slug, 'casmi26-' + slug, cells, gpu=False,
+                 kernel_sources=['satyajeetrai/casmi26-cpu-prep-cache-pools-baseline', 'satyajeetrai/casmi26-train-fp', 'satyajeetrai/casmi26-pop'],
+                 dataset_sources=DS + ['dmitriigluzdov/casmi26-pubchem-popularity-prior'])
+probe('probe1-pool', '--pubchem_top 0 --lib_gate 0.8')
+probe('probe2-pubchem', '--pubchem_top 500 --pc_select pop --lib_gate 0.8')
+probe('probe3-pop', '--pubchem_top 500 --pc_select pop --lib_gate 0.8 --pop_w 0.15')
+
+# 18) library-token check (CPU): S1/S2/S3 pool-only fused retrieval with the np-examples token vs the enveda-180 token
+infer_variant('libtok', [('--mode val --pubchem_top 0 --frag_top 0', 'v_c1_np.pkl'), ('--mode val --pubchem_top 0 --frag_top 0 --np_lib_as enveda-180', 'v_c1_e180.pkl'),
+                         ('--mode val --class2 --pubchem_top 0 --frag_top 0', 'v_c2_np.pkl'), ('--mode val --class2 --pubchem_top 0 --frag_top 0 --np_lib_as enveda-180', 'v_c2_e180.pkl')])

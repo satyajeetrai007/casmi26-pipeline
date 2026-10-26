@@ -102,6 +102,14 @@ def mrr_of(df, score, by='set'):
 
 print('baseline fused (ll+con) ', mrr_of(D, D.z_ll + D.z_con)); print('baseline ll            ', mrr_of(D, D.ll)); print('baseline con           ', mrr_of(D, D.con))
 if 'z_pop' in D: print('fused + 0.3 z_pop       ', mrr_of(D, D.z_ll + D.z_con + 0.3 * D.z_pop))
+def save_rr(D, pred, path):
+    rows = []
+    for qid, g in D.assign(score=pred).groupby('qid'):
+        order = np.argsort(-g.score.values, kind='stable')[:25]; lab = g.label.values[order]; pos = np.where(lab == 1)[0]
+        rows.append(dict(qid=qid, id=R.loc[qid, 'id'], set=g.set.iloc[0], key=R.loc[qid, 'key'], rr=(1.0 / (pos[0] + 1)) if len(pos) else 0.0))
+    pd.DataFrame(rows).to_csv(path, index=False); print('saved per-query rr ->', path)
+
+
 def lb_estimate(D, pred):
     m = mrr_of(D, pred); tp = D.groupby('qid').truth_pop.first(); pos = tp[tp > 0]
     terc = pd.qcut(pos, 3, labels=['pop_low', 'pop_mid', 'pop_high']) if len(pos) >= 3 else pd.Series(dtype=object)
@@ -116,7 +124,7 @@ if args.apply:
     for f_ in rk['feats']:
         if f_ not in D.columns: D[f_] = np.nan
     pred_a = np.mean([lgb.Booster(model_str=s_).predict(D[rk['feats']]) for s_ in rk['boosters']], 0)
-    print('=== frozen ranker', args.apply, 'on', args.scores); lb_estimate(D, pred_a)
+    print('=== frozen ranker', args.apply, 'on', args.scores); lb_estimate(D, pred_a); save_rr(D, pred_a, '/kaggle/working/rr_apply.csv')
     print('=== fused (ll+con) on the same records'); lb_estimate(D, (D.z_ll + D.z_con).values)
     print('RANK DONE'); raise SystemExit(0)
 qids = D.qid.unique(); rng.shuffle(qids); folds = np.array_split(qids, 5)
@@ -129,7 +137,7 @@ for fi, fq in enumerate(folds):
         bst = lgb.train({**params, 'seed': seed}, lgb.Dataset(Dtr[feats], Dtr.label, group=grp_tr), num_boost_round=args.rounds)
         pred[te] += bst.predict(D.loc[te, feats]) / args.seeds; boosters.append(bst)
     print(f'fold {fi} done', flush=True)
-print('ranker (5-fold CV)      ', mrr_of(D, pred)); lb_estimate(D, pred)
+print('ranker (5-fold CV)      ', mrr_of(D, pred)); lb_estimate(D, pred); save_rr(D, pred, '/kaggle/working/rr_cv.csv')
 # honest class-2 view: masked queries (truth treated as PubChem-only) split by how documented the truth is in PubChem
 tp = D.groupby('qid').truth_pop.first(); terc = pd.qcut(tp[tp > 0], 3, labels=['pop_low', 'pop_mid', 'pop_high'])
 D['pop_terc'] = D.qid.map(terc).astype(str); D['pop_terc'] = np.where(D.qid.map(tp) > 0, D.pop_terc, 'pop_zero')

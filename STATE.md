@@ -4,7 +4,10 @@
 | when (UTC) | submission | public | notes |
 |---|---|---|---|
 | 2026-10-21 19:48 | V0 private fork of a public pipeline (reference only, never to be resubmitted) | 0.456 | |
-| 2026-10-25 ~23:45 | V2: spectral-fit PubChem selection + ranker trained on honest records (kernel casmi26-final-hc v1, submitted automatically from the owner's PC when its run passes) | pending | calibrated estimate C = 0.498 |
+| 2026-10-26 00:10 + 14:31 | V2: spectral-fit PubChem selection + ranker trained on honest records (casmi26-final-hc v1) - submitted TWICE by mistake (routine + PC watcher) | **0.255** | estimate C 0.498 -> estimator C is wrong too |
+| 2026-10-26 16:17 | P1 probe (CPU): pool only, spectral fused score, library hits >= 0.8 first, no ranker/simulators | 0.226 | diagnostic |
+| 2026-10-26 16:55 | P2 probe (CPU): P1 + 500 PubChem-window candidates chosen by popularity | 0.184 | PubChem candidates hurt when ranked by spectral score alone |
+| 2026-10-26 17:41 | P3 probe (CPU): P2 + 0.15 x popularity in the score | 0.215 | popularity recovers part of it |
 | 2026-10-25 17:11 | V1 own pipeline: fp_v2 + PubChem window (top-500 by popularity) + GLACIER/ICEBERG + leak-free LambdaRank (kernel casmi26-final v2) | **0.287** | val LB estimate 0.599 -> ratio 0.48: validation was badly miscalibrated |
 
 Public best at hand-over: 0.467 (public notebooks), LB #1 0.504.
@@ -52,3 +55,10 @@ New PubChem selection `--pc_select fp`: pre-score up to 20,000 window members by
 | V1 (popularity-based PubChem selection, V1 ranker) | 0.978 | 0.014 | 0.461 | 0.287 (actual 0.287) |
 | V2 (spectral-fit PubChem selection, rank-hc ranker) | 0.891 | 0.771 | 0.522 | 0.498 |
 Estimator C was chosen after seeing V1's score (one calibration point): use it for decisions, and re-check it against V2's public score.
+
+## Diagnosis after V2 + probes (2026-10-27)
+- Own spectral retrieval alone (P1) = 0.226; the ranker + simulators add only ~+0.06-0.10 on top. The public engine alone reaches ~0.35, so the core spectrum model is the weak part, not the ranker.
+- Suspected bug under test (kernel casmi26-libtok, CPU): every enveda-np-examples structure is in the S1 holdout, so the `enveda-np-examples` library embedding of the spectrum model never trained, yet test inference encodes every hidden test spectrum with that token. Fix flag: `infer_fp.py --np_lib_as enveda-180`.
+
+## Blocked
+- The hourly routine (trig_01KBQwDr1zjhQzNHjqMeUTjx) is PAUSED: its GitHub push fails with 403 "Resource not accessible by integration", so it could not record its V2 submission and the PC submitted V2 again. Do not re-enable until a test run can push.
