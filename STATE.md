@@ -12,6 +12,8 @@
 | 2026-10-28 15:12 | P5 probe: pool only, contrastive only, lib gate 0.8 | 0.203 | |
 | 2026-10-28 15:12 | P6 probe: pool only, popularity prior only (spectrum-blind), lib gate 0.8 | 0.170 | our spectral score adds only +0.057 over popularity |
 | 2026-10-28 17:04 | P7 probe: P1 + own mass-shifted analog channel (w_ap 0.5) | **0.264** | +0.038 over P1: analog channel confirmed on LB |
+| 2026-10-28 ~19:00 | P8 probe: P7 + training structures demoted when library match < 0.8 | 0.230 | dead end: weak-library-match answers are often training structures |
+| pending (after 2026-10-29 00:00) | P9: P7 + GLACIER/ICEBERG same-formula re-score (top 40) + tautomer dedupe (casmi26-final-p9 v2) | | |
 | 2026-10-25 17:11 | V1 own pipeline: fp_v2 + PubChem window (top-500 by popularity) + GLACIER/ICEBERG + leak-free LambdaRank (kernel casmi26-final v2) | **0.287** | val LB estimate 0.599 -> ratio 0.48: validation was badly miscalibrated |
 
 Public best at hand-over: 0.467 (public notebooks), LB #1 0.504.
