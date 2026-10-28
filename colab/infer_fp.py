@@ -392,7 +392,7 @@ if args.mode == 'val':
     if 'rr_gen' in R.columns:
         GW = pd.DataFrame([dict(set=s_, **d_) for s_, d_ in zip(R['set'], R['rr_gen']) if isinstance(d_, dict)])
         print('GEN SWEEP (MRR@25; fused + w z(ap) - pen * is_gen)'); print(GW.groupby('set').mean().round(4).T.to_string())
-        print('n_gen median by set', R.groupby('set').n_gen.median().to_dict(), '| truth generated', R.groupby('set').truth_gen.mean().round(3).to_dict())
+        print("n_gen median by set", R.groupby("set").n_gen.median().to_dict(), "| truth generated", R.groupby("set").truth_gen.apply(lambda s: float(pd.to_numeric(s, errors="coerce").fillna(0).mean())).round(3).to_dict())
         print('analog top sim median by set', R.groupby('set').an_top_sim.median().round(3).to_dict())
 if args.sub:
     rows = []; n_gate = 0

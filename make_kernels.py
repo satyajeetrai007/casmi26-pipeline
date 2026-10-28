@@ -439,3 +439,18 @@ def genval_kernel(slug):
                  kernel_sources=['satyajeetrai/casmi26-cpu-prep-cache-pools-baseline', 'satyajeetrai/casmi26-train-fp', 'satyajeetrai/casmi26-pop'],
                  dataset_sources=DS + ['dmitriigluzdov/casmi26-pubchem-popularity-prior'])
 genval_kernel('gen-val')
+
+# 29) P10 probe: P7 + class-3 derivative channel (6 parents, no penalty)
+def probe_gen(slug, extra):
+    cmd = ("import os, subprocess, pandas as pd, glob, numpy as np\n"
+           f"print(subprocess.run(f\"cd /content/work && python -u infer_fp.py --ckpt {{os.environ['CKPT']}} --mode test {extra} --frag_top 0 --out /kaggle/working/test_probe.pkl --sub /kaggle/working/submission.csv 2>&1 | tail -6\", shell=True, capture_output=True, text=True).stdout)\n"
+           "sub = pd.read_csv('/kaggle/working/submission.csv'); te = pd.read_parquet(sorted(glob.glob('/kaggle/input/**/test.parquet', recursive=True), key=len)[0], columns=['molecule_id'])\n"
+           "assert set(sub.molecule_id) == set(te.molecule_id.unique()) and sub.molecule_id.is_unique and sub.smiles.notna().all() and (sub.smiles.str.count(';') <= 24).all(), 'submission invalid'\n"
+           "R = pd.read_pickle('/kaggle/working/test_probe.pkl'); g = R.is_gen.apply(lambda a: np.asarray(a)[:1].sum() if isinstance(a, np.ndarray) else 0)\n"
+           "print('n_gen median', R.n_gen.median(), '| top-1 generated', int(g.sum()), 'of', len(R), '| generated in top 5', float(R.is_gen.apply(lambda a: np.asarray(a)[:5].sum() if isinstance(a, np.ndarray) else 0).mean()))\n"
+           "print('OK submission', sub.shape)\n")
+    cells = [code(INFER_SETUP)] + script_cells(['fpmodel.py', 'build_train_cache.py', 'fragscore.py', 'analog.py', 'derive.py', 'infer_fp.py']) + [code(cmd)]
+    write_kernel(os.path.join(S, 'k_' + slug), 'casmi26-' + slug, 'casmi26-' + slug, cells, gpu=False,
+                 kernel_sources=['satyajeetrai/casmi26-cpu-prep-cache-pools-baseline', 'satyajeetrai/casmi26-train-fp', 'satyajeetrai/casmi26-pop'],
+                 dataset_sources=DS + ['dmitriigluzdov/casmi26-pubchem-popularity-prior'])
+probe_gen('probe10-gen', '--pubchem_top 0 --lib_gate 0.8 --analog 100 --w_ap 0.5 --gen 6 --gen_pen 0')
