@@ -72,7 +72,7 @@ for _, r in R.iterrows():
     if k not in row:
         continue
     M = mass[row[k]]
-    an = [(a, v) for a, v, _ in (r.get('an_list') or []) if v >= args.min_sim and a in row and a != k][:args.n_parents]
+    an = [(a, v) for a, v, _ in (r.get('an_list') if isinstance(r.get('an_list'), list) else []) if v >= args.min_sim and a in row and a != k][:args.n_parents]
     orc = oracle_parents(k, args.n_parents)
     parents = dict(A=[(smi[row[a]], mass[row[a]]) for a, _ in an], B=[(smi[row[a]], mass[row[a]]) for a, _ in orc])
     jobs.append((r['id'], k, smi[row[k]], M, parents))

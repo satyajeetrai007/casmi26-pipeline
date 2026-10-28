@@ -412,12 +412,30 @@ infer_variant2('analog-var', [('fp_v2', B + ' --analog 100 --ap_power 2', 'v_c2_
 GEN_CMD = r'''import os, subprocess, shutil, glob
 shutil.copy(find('val_queries_seed0.pkl'), '/content/work/val_queries_seed0.pkl')
 ck = sorted(glob.glob('/kaggle/input/**/runs/fp_v2/ema.pt', recursive=True))[0]
-print(subprocess.run(f"cd /content/work && python -u infer_fp.py --ckpt {ck} --mode val --class2 --pubchem_top 0 --frag_top 0 --analog 100 --out /kaggle/working/v_c2_anl.pkl 2>&1 | tail -5", shell=True, capture_output=True, text=True).stdout)
+prev = glob.glob('/kaggle/input/**/v_c2_anl.pkl', recursive=True)
+if prev: shutil.copy(prev[0], '/kaggle/working/v_c2_anl.pkl')
+else: print(subprocess.run(f"cd /content/work && python -u infer_fp.py --ckpt {ck} --mode val --class2 --pubchem_top 0 --frag_top 0 --analog 100 --out /kaggle/working/v_c2_anl.pkl 2>&1 | tail -5", shell=True, capture_output=True, text=True).stdout)
 print(subprocess.run('cd /content/work && python -u gen_oracle.py --records /kaggle/working/v_c2_anl.pkl --out /kaggle/working/gen_oracle.pkl 2>&1 | tail -40', shell=True, capture_output=True, text=True).stdout)
 '''
 def gen_oracle_kernel(slug):
     cells = [code(INFER_SETUP)] + script_cells(['fpmodel.py', 'build_train_cache.py', 'fragscore.py', 'analog.py', 'infer_fp.py', 'derive.py', 'gen_oracle.py']) + [code(GEN_CMD)]
     write_kernel(os.path.join(S, 'k_' + slug), 'casmi26-' + slug, 'casmi26-' + slug, cells, gpu=False,
-                 kernel_sources=['satyajeetrai/casmi26-cpu-prep-cache-pools-baseline', 'satyajeetrai/casmi26-train-fp', 'satyajeetrai/casmi26-pop'],
+                 kernel_sources=['satyajeetrai/casmi26-cpu-prep-cache-pools-baseline', 'satyajeetrai/casmi26-train-fp', 'satyajeetrai/casmi26-pop', 'satyajeetrai/casmi26-gen-oracle'],
                  dataset_sources=DS + ['dmitriigluzdov/casmi26-pubchem-popularity-prior'])
 gen_oracle_kernel('gen-oracle')
+
+# 28) class-3 channel validation: generated derivatives in the candidate list, class-2 (truth in pool) and class-3 (truth removed) sims
+GENV_CMD = r'''import os, subprocess, shutil, glob
+shutil.copy(find('val_queries_seed0.pkl'), '/content/work/val_queries_seed0.pkl')
+ck = sorted(glob.glob('/kaggle/input/**/runs/fp_v2/ema.pt', recursive=True))[0]
+B = '--mode val --class2 --pubchem_top 0 --frag_top 0 --analog 100 --w_ap 0.5 --gen 6 --gen_pen 0'
+for extra, out in (('', 'v_c2_gen.pkl'), ('--truth_pubchem', 'v_c3_gen.pkl')):
+    print('=====', extra or 'class-2 (truth in pool)')
+    print(subprocess.run(f"cd /content/work && python -u infer_fp.py --ckpt {ck} {B} {extra} --out /kaggle/working/{out} 2>&1 | grep -v '^  [0-9]' | tail -45", shell=True, capture_output=True, text=True).stdout)
+'''
+def genval_kernel(slug):
+    cells = [code(INFER_SETUP)] + script_cells(['fpmodel.py', 'build_train_cache.py', 'fragscore.py', 'analog.py', 'derive.py', 'infer_fp.py']) + [code(GENV_CMD)]
+    write_kernel(os.path.join(S, 'k_' + slug), 'casmi26-' + slug, 'casmi26-' + slug, cells, gpu=False,
+                 kernel_sources=['satyajeetrai/casmi26-cpu-prep-cache-pools-baseline', 'satyajeetrai/casmi26-train-fp', 'satyajeetrai/casmi26-pop'],
+                 dataset_sources=DS + ['dmitriigluzdov/casmi26-pubchem-popularity-prior'])
+genval_kernel('gen-val')

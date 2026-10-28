@@ -17,6 +17,7 @@ p.add_argument('--limit', type=int, default=0); p.add_argument('--class2', actio
 p.add_argument('--truth_pubchem', action='store_true', help='val: also remove the truth from the pool so it can only re-enter through the PubChem window (test-like class 2)')
 p.add_argument('--pc_select', default='fp', choices=['fp', 'pop']); p.add_argument('--pc_pop_union', type=int, default=100); p.add_argument('--pc_cap', type=int, default=20000)
 p.add_argument('--sub_score', default='fused', choices=['fused', 'll', 'con', 'prior'], help='submission base score: fused, fingerprint log-lik only, contrastive only, or popularity prior only (spectrum-blind)')
+p.add_argument('--gen', type=int, default=0, help='class-3 channel: derivatives of the top --gen spectral analogs (needs --analog)'); p.add_argument('--gen_pen', type=float, default=1.0, help='fused -= gen_pen for generated candidates'); p.add_argument('--gen_min_sim', type=float, default=0.3)
 p.add_argument('--analog', type=int, default=0, help='mass-shifted analog search: number of analogs per molecule (0 = off)'); p.add_argument('--w_ap', type=float, default=0.0, help='fused += w_ap * z(analog propagation ap)')
 p.add_argument('--analog_win', type=float, default=200.0)
 p.add_argument('--ap_power', type=float, default=4.0)
@@ -234,6 +235,15 @@ def pubchem_window(target, exclude_keys, pb=None):
     return dict(idx=idx, keys=keys, smiles=smiles, feats=feats, n_window=int(hi - lo))
 
 
+def _gen_job(a):
+    psmi, delta, tol = a
+    try:
+        import derive as dv
+        return list(dv.derive(psmi, delta, tol=tol, max_steps=2).items())
+    except Exception:
+        return []
+
+
 def _frag_job(a):
     smi, specs = a
     try:
@@ -277,6 +287,36 @@ for qi, q in enumerate(queries):
             bits_p = np.concatenate([bits_p, wb[good]]); maccs_p = np.concatenate([maccs_p, wm[good]]); cnt_p = np.concatenate([cnt_p, wc[good]])
             for n in POPCOLS:
                 popf[n] = np.concatenate([popf[n], w['feats'][n][good] if n in w['feats'] else np.zeros(len(good), np.float32)])
+    an = None
+    if AIDX is not None:
+        an = AIDX.search(specs, target, win=args.analog_win, n_out=args.analog, exclude_key=q['key'], exclude_lib=(None if args.class2 else q.get('lib'))) if q['key'] is not None else AIDX.search(specs, target, win=args.analog_win, n_out=args.analog)
+        an = [(k, v, sh) for k, v, sh in an if k in pool_row]
+    is_gen = np.zeros(len(keys), np.float32); gen_sim = np.zeros(len(keys), np.float32); r['n_gen'] = 0
+    if args.gen > 0 and an:
+        par = [(k, v) for k, v, _ in an if v >= args.gen_min_sim][:args.gen]
+        tol = target * args.ppm * 1e-6
+        gres = POOL_MP.map(_gen_job, [(pool_smiles[pool_row[k]], target - float(pool_mass[pool_row[k]]), tol) for k, _ in par])
+        gsmi, gs = [], []
+        seen_s = set()
+        for (k, v), prods in zip(par, gres):
+            for smi_, plan_ in prods:
+                if smi_ not in seen_s:
+                    seen_s.add(smi_); gsmi.append(smi_); gs.append(v)
+        gsmi, gs = gsmi[:400], gs[:400]
+        if gsmi:
+            fr = POOL_MP.map(fp_worker, [gsmi[i:i + 50] for i in range(0, len(gsmi), 50)])
+            gb = np.concatenate([x[0] for x in fr]); gm = np.concatenate([x[1] for x in fr]); gc = np.concatenate([x[2] for x in fr]); gmass = np.concatenate([x[3] for x in fr]); gform = sum([x[4] for x in fr], []); gok = np.concatenate([x[5] for x in fr]); gik = sum([list(x[6]) for x in fr], [])
+            kset = set(keys); good = []
+            for i in range(len(gsmi)):
+                if gok[i] and len(gik[i]) == 14 and gik[i] not in kset and abs(gmass[i] - target) <= tol:
+                    kset.add(gik[i]); good.append(i)
+            if good:
+                keys += [gik[i] for i in good]; smiles += [gsmi[i] for i in good]; formula += [gform[i] for i in good]; mass += [float(gmass[i]) for i in good]; src += [32] * len(good)
+                bits_p = np.concatenate([bits_p, gb[good]]); maccs_p = np.concatenate([maccs_p, gm[good]]); cnt_p = np.concatenate([cnt_p, gc[good]])
+                for n in POPCOLS:
+                    popf[n] = np.concatenate([popf[n], np.zeros(len(good), np.float32)])
+                is_gen = np.concatenate([is_gen, np.ones(len(good), np.float32)]); gen_sim = np.concatenate([gen_sim, np.array([gs[i] for i in good], np.float32)])
+                r['n_gen'] = len(good)
     n_all = len(keys)
     if n_all == 0:
         r.update(keys=[], smiles=[], n_cands=0); results.append(r); continue
@@ -286,8 +326,6 @@ for qi, q in enumerate(queries):
     fused = z(ll) + args.w_con * z(con)
     apf = None
     if AIDX is not None:
-        an = AIDX.search(specs, target, win=args.analog_win, n_out=args.analog, exclude_key=q['key'], exclude_lib=(None if args.class2 else q.get('lib'))) if q['key'] is not None else AIDX.search(specs, target, win=args.analog_win, n_out=args.analog)
-        an = [(k, v, sh) for k, v, sh in an if k in pool_row]
         an_bits = np.unpackbits(P_BITS[np.array([pool_row[k] for k, _, _ in an], np.int64)], axis=1)[:, :4096].astype(np.float32) if an else np.zeros((0, 4096), np.float32)
         apf = anmod.analog_features(yb.cpu().numpy() if torch.is_tensor(yb) else yb, an_bits, np.array([v for _, v, _ in an], np.float32), power=args.ap_power)
         r['an_top_sim'] = float(an[0][1]) if an else 0.0; r['an_n'] = len(an); r['an_list'] = [(k, float(v), float(sh)) for k, v, sh in an[:20]]
@@ -299,8 +337,17 @@ for qi, q in enumerate(queries):
                     sc_ = base + w * z(apf['ap'])
                     sw[f'{bn}+{w}'] = (1.0 / (1 + int((sc_ > sc_[ti[0]]).sum()))) if len(ti) else 0.0
             r['rr_sweep'] = {k_: (v_ if v_ >= 1 / 25 else 0.0) for k_, v_ in sw.items()}
+            if args.gen > 0:
+                gw = {}
+                for w in (0.25, 0.5, 1.0):
+                    for pen in (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 99.0):
+                        sc_ = fused + w * z(apf['ap']) - pen * is_gen
+                        v_ = (1.0 / (1 + int((sc_ > sc_[ti[0]]).sum()))) if len(ti) else 0.0
+                        gw[f'w{w}_pen{pen}'] = v_ if v_ >= 1 / 25 else 0.0
+                r['rr_gen'] = gw; r['truth_gen'] = bool(len(ti) and is_gen[ti[0]] > 0)
         if args.w_ap > 0:
             fused = fused + args.w_ap * z(apf['ap'])
+    fused = fused - args.gen_pen * is_gen
     libsc = np.array([libs.get(k, 0.0) for k in keys], np.float32)
     # analog propagation: Tanimoto of each candidate to the structures of the best library hits (train structures)
     hits = sorted(((v, k) for k, v in libs.items() if v >= 0.3 and k in pool_row), reverse=True)[:8]
@@ -314,10 +361,10 @@ for qi, q in enumerate(queries):
     r['n_hits'] = len(hits)
     # keep top --keep by fused score, but never fewer than 60 pool candidates and 60 PubChem candidates
     order = np.argsort(-fused, kind='stable'); is_pc = src == 16
-    keep = set(order[:args.keep].tolist()) | set(order[~is_pc[order]][:60].tolist()) | set(order[is_pc[order]][:60].tolist())
+    keep = set(order[:args.keep].tolist()) | set(order[~is_pc[order]][:60].tolist()) | set(order[is_pc[order]][:60].tolist()) | set(order[(src == 32)[order]][:40].tolist())
     order = np.array([i for i in order if i in keep])
     rec = dict(keys=keys[order].tolist(), smiles=[smiles[i] for i in order], formula=[formula[i] for i in order], mass=np.array(mass)[order], src=src[order],
-               ll=ll[order], con=con[order], fused=fused[order], libsc=libsc[order], analog=analog[order], analog_top=analog_top[order], n_cands=n_all)
+               ll=ll[order], con=con[order], fused=fused[order], libsc=libsc[order], analog=analog[order], analog_top=analog_top[order], n_cands=n_all, is_gen=is_gen[order], gen_sim=gen_sim[order])
     if apf is not None:
         for n_, v_ in apf.items():
             rec[n_] = v_[order]
@@ -342,6 +389,10 @@ if args.mode == 'val':
     if 'rr_sweep' in R.columns:
         SW = pd.DataFrame([dict(set=s_, **d_) for s_, d_ in zip(R['set'], R['rr_sweep']) if isinstance(d_, dict)])
         print('ANALOG SWEEP (MRR@25 over all candidates; base + w * z(ap))'); print(SW.groupby('set').mean().round(4).T.to_string())
+    if 'rr_gen' in R.columns:
+        GW = pd.DataFrame([dict(set=s_, **d_) for s_, d_ in zip(R['set'], R['rr_gen']) if isinstance(d_, dict)])
+        print('GEN SWEEP (MRR@25; fused + w z(ap) - pen * is_gen)'); print(GW.groupby('set').mean().round(4).T.to_string())
+        print('n_gen median by set', R.groupby('set').n_gen.median().to_dict(), '| truth generated', R.groupby('set').truth_gen.mean().round(3).to_dict())
         print('analog top sim median by set', R.groupby('set').an_top_sim.median().round(3).to_dict())
 if args.sub:
     rows = []; n_gate = 0
