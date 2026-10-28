@@ -89,7 +89,7 @@ def build(R, mask_frac):
     return pd.concat(rows, ignore_index=True)
 
 
-D = build(R, args.mask_frac); feats = [c for c in D.columns if c not in ('qid', 'set', 'label', 'masked', 'truth_pop')]
+D = build(R, args.mask_frac); feats = [c for c in D.columns if c not in ('qid', 'set', 'label', 'masked', 'truth_pop', '_fold')]
 PRIOR_FEATS = [c for c in feats if c.startswith('pop_') or c.startswith('dep_') or c.startswith('np_') or c in ('z_pop', 'n_cands', 'n_same_formula', 'n_pubchem', 'n_spec', 'ppm')]
 print('rows', len(D), 'queries', D.qid.nunique(), 'positives', int(D.label.sum()), 'masked queries', int(D.groupby('qid').masked.first().sum()), 'features', len(feats))
 
@@ -133,7 +133,11 @@ if args.apply:
     print('=== frozen ranker', args.apply, 'on', args.scores); lb_estimate(D, pred_a); save_rr(D, pred_a, '/kaggle/working/rr_apply.csv')
     print('=== fused (ll+con) on the same records'); lb_estimate(D, (D.z_ll + D.z_con).values)
     print('RANK DONE'); raise SystemExit(0)
-qids = D.qid.unique(); rng.shuffle(qids); folds = np.array_split(qids, 5)
+# folds by STRUCTURE, not by record: the class-1 and class-2 files hold the same molecules with near-identical candidate lists,
+# so a record-level split puts the same molecule on both sides and the ranker memorises it (inflated every earlier CV).
+qkey = D.qid.map(R['key'].astype(str)); ukeys = qkey.unique(); rng.shuffle(ukeys); kfold = {k: i % 5 for i, k in enumerate(ukeys)}
+D['_fold'] = qkey.map(kfold).values; folds = [D.qid[D._fold == i].unique() for i in range(5)]
+print('folds by structure:', [len(f) for f in folds], 'records;', len(ukeys), 'structures')
 pred = np.zeros(len(D)); boosters = []
 params = dict(objective='lambdarank', metric='ndcg', eval_at=[25], learning_rate=0.03, num_leaves=15, min_data_in_leaf=40, feature_fraction=0.8, bagging_fraction=0.8, bagging_freq=1, lambda_l2=1.0, verbose=-1, lambdarank_truncation_level=30)
 for fi, fq in enumerate(folds):

@@ -372,3 +372,52 @@ probe('probe7-analog', '--pubchem_top 0 --lib_gate 0.8 --analog 100 --w_ap 0.5')
 
 # 23) pool-only ranker with the analog channel: CV on class-1 + class-2 records (no PubChem, no simulators)
 rank_variant('rank-analog', ['v_c1_analog.pkl', 'v_c2_analog.pkl'], [], '', ['casmi26-analog-val'])
+
+# 24) train-demotion probe: P7 + training structures after all others when the best library match < 0.8
+probe('probe8-demote', '--pubchem_top 0 --lib_gate 0.8 --analog 100 --w_ap 0.5 --demote_train 0.8')
+
+# 25) P9 = P7 (pool only, analog w 0.5, lib gate 0.8) + GLACIER/ICEBERG same-formula re-scoring of the top 40 (fixed weights, no ranker)
+P9_CMD = FINAL_CMD.split("run(f\"cd /content/work && python -u infer_fp.py")[0] + r"""
+run(f"cd /content/work && python -u infer_fp.py --ckpt {os.environ['CKPT']} --mode test --pubchem_top 0 --frag_top 0 --analog 100 --w_ap 0.5 --lib_gate 0.8 --out /content/work/test_scores.pkl --sub /kaggle/working/submission_p7.csv 2>&1 | tail -8")
+run(f"cd /content/work && python -u gl_val.py --mode test --scores /content/work/test_scores.pkl --gl_pkg {os.environ['GL_PKG']} --ice_pkg {os.environ['ICE_PKG']} --wheels {os.environ['ICE_WHEELS']} --budget 3000 --top_n 40 --out /content/work/gl_test_out.pkl 2>&1 | grep -v -E 'chunk:|adj = torch' | tail -12")
+import shutil
+gl_ok = os.path.exists('/content/work/gl_test_out.pkl')
+run("cd /content/work && python -u fixed_rerank.py --scores test_scores.pkl " + ("--gl gl_test_out.pkl " if gl_ok else "") + "--lam 1.0 --top_n 40 --lib_gate 0.8 --out /kaggle/working/submission.csv 2>&1 | tail -8")
+if not os.path.exists('/kaggle/working/submission.csv'): shutil.copy('/kaggle/working/submission_p7.csv', '/kaggle/working/submission.csv'); print('FALLBACK to P7 order')
+sub = pd.read_csv('/kaggle/working/submission.csv'); te = pd.read_parquet(sorted(__import__('glob').glob('/kaggle/input/**/test.parquet', recursive=True), key=len)[0], columns=['molecule_id'])
+assert set(sub.molecule_id) == set(te.molecule_id.unique()) and sub.molecule_id.is_unique and sub.smiles.notna().all() and (sub.smiles.str.count(';') <= 24).all(), 'submission invalid'
+print('OK submission', sub.shape, f'total {time.time()-T1:.0f}s')
+"""
+assert 'def run(cmd)' in P9_CMD
+write_kernel(os.path.join(S, 'k_final-p9'), 'casmi26-final-p9', 'casmi26-final-p9',
+             [code(FINAL_SETUP.replace("shutil.copy(find('ranker.pkl'), '/content/work/ranker.pkl')", 'pass'))] + script_cells(['fpmodel.py', 'build_train_cache.py', 'fragscore.py', 'analog.py', 'infer_fp.py', 'gl_val.py', 'fixed_rerank.py']) + [code(P9_CMD)], gpu=True,
+             kernel_sources=['satyajeetrai/casmi26-cpu-prep-cache-pools-baseline', 'satyajeetrai/casmi26-train-fp', 'satyajeetrai/casmi26-pop'],
+             dataset_sources=DS + ['dmitriigluzdov/casmi26-pubchem-popularity-prior', 'ahmedberatozer/casmi26-iceberg', 'ahmedberatozer/casmi26-glacier', 'eveliaveldrine/rdkit-wheels'])
+
+# 26) analog variants + fp_v3 model (CPU, class-2 pool only): power 2, wide window, fp_v3 checkpoint
+def infer_variant2(slug, jobs, extra_sources=()):
+    cmd = "import os, subprocess, shutil, glob\nshutil.copy(find('val_queries_seed0.pkl'), '/content/work/val_queries_seed0.pkl')\nCK = {r: sorted(glob.glob(f'/kaggle/input/**/runs/{r}/ema.pt', recursive=True)) for r in ('fp_v2', 'fp_v3')}; print(CK)\n"
+    for run_, extra, out in jobs:
+        cmd += f"print(subprocess.run(f\"cd /content/work && python -u infer_fp.py --ckpt {{CK['{run_}'][0]}} {extra} --out /kaggle/working/{out} 2>&1 | grep -A 30 'ANALOG SWEEP' | head -24\", shell=True, capture_output=True, text=True).stdout)\n"
+    cells = [code(INFER_SETUP)] + script_cells(['fpmodel.py', 'build_train_cache.py', 'fragscore.py', 'analog.py', 'infer_fp.py']) + [code(cmd)]
+    write_kernel(os.path.join(S, 'k_' + slug), 'casmi26-' + slug, 'casmi26-' + slug, cells, gpu=False,
+                 kernel_sources=['satyajeetrai/casmi26-cpu-prep-cache-pools-baseline', 'satyajeetrai/casmi26-train-fp', 'satyajeetrai/casmi26-pop'] + list(extra_sources),
+                 dataset_sources=DS + ['dmitriigluzdov/casmi26-pubchem-popularity-prior'])
+B = '--mode val --class2 --pubchem_top 0 --frag_top 0'
+infer_variant2('analog-var', [('fp_v2', B + ' --analog 100 --ap_power 2', 'v_c2_pow2.pkl'), ('fp_v2', B + ' --analog 200 --analog_win 300', 'v_c2_wide.pkl'),
+                              ('fp_v3', B + ' --analog 100', 'v_c2_fpv3.pkl')], ['satyajeetrai/casmi26-train-fprank'])
+
+
+# 27) class-3 feasibility: derivatives of spectral analogs / Tanimoto-oracle parents (CPU)
+GEN_CMD = r'''import os, subprocess, shutil, glob
+shutil.copy(find('val_queries_seed0.pkl'), '/content/work/val_queries_seed0.pkl')
+ck = sorted(glob.glob('/kaggle/input/**/runs/fp_v2/ema.pt', recursive=True))[0]
+print(subprocess.run(f"cd /content/work && python -u infer_fp.py --ckpt {ck} --mode val --class2 --pubchem_top 0 --frag_top 0 --analog 100 --out /kaggle/working/v_c2_anl.pkl 2>&1 | tail -5", shell=True, capture_output=True, text=True).stdout)
+print(subprocess.run('cd /content/work && python -u gen_oracle.py --records /kaggle/working/v_c2_anl.pkl --out /kaggle/working/gen_oracle.pkl 2>&1 | tail -40', shell=True, capture_output=True, text=True).stdout)
+'''
+def gen_oracle_kernel(slug):
+    cells = [code(INFER_SETUP)] + script_cells(['fpmodel.py', 'build_train_cache.py', 'fragscore.py', 'analog.py', 'infer_fp.py', 'derive.py', 'gen_oracle.py']) + [code(GEN_CMD)]
+    write_kernel(os.path.join(S, 'k_' + slug), 'casmi26-' + slug, 'casmi26-' + slug, cells, gpu=False,
+                 kernel_sources=['satyajeetrai/casmi26-cpu-prep-cache-pools-baseline', 'satyajeetrai/casmi26-train-fp', 'satyajeetrai/casmi26-pop'],
+                 dataset_sources=DS + ['dmitriigluzdov/casmi26-pubchem-popularity-prior'])
+gen_oracle_kernel('gen-oracle')

@@ -19,6 +19,8 @@ p.add_argument('--pc_select', default='fp', choices=['fp', 'pop']); p.add_argume
 p.add_argument('--sub_score', default='fused', choices=['fused', 'll', 'con', 'prior'], help='submission base score: fused, fingerprint log-lik only, contrastive only, or popularity prior only (spectrum-blind)')
 p.add_argument('--analog', type=int, default=0, help='mass-shifted analog search: number of analogs per molecule (0 = off)'); p.add_argument('--w_ap', type=float, default=0.0, help='fused += w_ap * z(analog propagation ap)')
 p.add_argument('--analog_win', type=float, default=200.0)
+p.add_argument('--ap_power', type=float, default=4.0)
+p.add_argument('--demote_train', type=float, default=0.0, help='submission order: when the best library match is below this cosine, training structures go after all other candidates (class-2/3 answers are never training structures)')
 p.add_argument('--np_lib_as', default='', help="encode spectra whose library token is 'enveda-np-examples' as this library instead (its embedding is untrained when S1 is held out)")
 p.add_argument('--lib_gate', type=float, default=0.0, help='submission order: library matches with cosine >= gate go first (0 = off)'); p.add_argument('--pop_w', type=float, default=0.0, help='submission order: + pop_w * (ln(1+SID) + ln(1+PMID))')
 args = p.parse_args()
@@ -287,8 +289,8 @@ for qi, q in enumerate(queries):
         an = AIDX.search(specs, target, win=args.analog_win, n_out=args.analog, exclude_key=q['key'], exclude_lib=(None if args.class2 else q.get('lib'))) if q['key'] is not None else AIDX.search(specs, target, win=args.analog_win, n_out=args.analog)
         an = [(k, v, sh) for k, v, sh in an if k in pool_row]
         an_bits = np.unpackbits(P_BITS[np.array([pool_row[k] for k, _, _ in an], np.int64)], axis=1)[:, :4096].astype(np.float32) if an else np.zeros((0, 4096), np.float32)
-        apf = anmod.analog_features(yb.cpu().numpy() if torch.is_tensor(yb) else yb, an_bits, np.array([v for _, v, _ in an], np.float32))
-        r['an_top_sim'] = float(an[0][1]) if an else 0.0; r['an_n'] = len(an)
+        apf = anmod.analog_features(yb.cpu().numpy() if torch.is_tensor(yb) else yb, an_bits, np.array([v for _, v, _ in an], np.float32), power=args.ap_power)
+        r['an_top_sim'] = float(an[0][1]) if an else 0.0; r['an_n'] = len(an); r['an_list'] = [(k, float(v), float(sh)) for k, v, sh in an[:20]]
         if q['key'] is not None:
             ti = np.where(keys == q['key'])[0]
             sw = {}
@@ -354,6 +356,8 @@ if args.sub:
                 sc = np.asarray(r[args.sub_score], np.float64).copy()
             if args.pop_w > 0 and 'pop_lsid' in r:
                 sc += args.pop_w * (np.asarray(r['pop_lsid'], np.float64) + np.asarray(r['pop_lpmid'], np.float64))
+            if args.demote_train > 0 and float(r.get('lib_top', 0.0)) < args.demote_train:
+                sc = sc - 1e3 * ((np.asarray(r['src']).astype(np.int64) & 1) > 0)
             if args.lib_gate > 0:
                 ls = np.asarray(r['libsc'], np.float64); g = ls >= args.lib_gate; n_gate += int(g.any())
                 sc = np.where(g, 1e6 + ls, sc)
