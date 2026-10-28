@@ -17,6 +17,8 @@ p.add_argument('--limit', type=int, default=0); p.add_argument('--class2', actio
 p.add_argument('--truth_pubchem', action='store_true', help='val: also remove the truth from the pool so it can only re-enter through the PubChem window (test-like class 2)')
 p.add_argument('--pc_select', default='fp', choices=['fp', 'pop']); p.add_argument('--pc_pop_union', type=int, default=100); p.add_argument('--pc_cap', type=int, default=20000)
 p.add_argument('--sub_score', default='fused', choices=['fused', 'll', 'con', 'prior'], help='submission base score: fused, fingerprint log-lik only, contrastive only, or popularity prior only (spectrum-blind)')
+p.add_argument('--analog', type=int, default=0, help='mass-shifted analog search: number of analogs per molecule (0 = off)'); p.add_argument('--w_ap', type=float, default=0.0, help='fused += w_ap * z(analog propagation ap)')
+p.add_argument('--analog_win', type=float, default=200.0)
 p.add_argument('--np_lib_as', default='', help="encode spectra whose library token is 'enveda-np-examples' as this library instead (its embedding is untrained when S1 is held out)")
 p.add_argument('--lib_gate', type=float, default=0.0, help='submission order: library matches with cosine >= gate go first (0 = off)'); p.add_argument('--pop_w', type=float, default=0.0, help='submission order: + pop_w * (ln(1+SID) + ln(1+PMID))')
 args = p.parse_args()
@@ -70,6 +72,12 @@ lib_ok = meta.adduct.isin(TEST_ADDUCTS).values & np.isfinite(nm_all) & (NPK >= 3
 lib_idx = np.where(lib_ok)[0]; o = np.argsort(nm_all[lib_idx]); lib_idx = lib_idx[o]; lib_nm = nm_all[lib_idx]
 lib_key = meta.inchikey14.values[lib_idx]; lib_lib = meta.ingest_lib.values[lib_idx]; lib_mode = meta.ionization_mode.values[lib_idx]
 print('library', len(lib_idx), f'{time.time()-t0:.0f}s', flush=True)
+AIDX = None
+if args.analog > 0:
+    import analog as anmod
+    AIDX = anmod.AnalogIndex(MZ, IT, NPK, meta.inchikey14.values.astype(str), meta.ionization_mode.values.astype(str), meta.ingest_lib.values.astype(str), nm_all, lib_ok)
+    print('analog index', len(AIDX.rows), 'representatives', f'{time.time()-t0:.0f}s', flush=True)
+W_SWEEP = (0.0, 0.25, 0.5, 1.0, 2.0, 4.0)
 
 
 def spec_arrays(i):
@@ -274,6 +282,23 @@ for qi, q in enumerate(queries):
     ll, con, yb = score_arrays(pb, pm, e, bits_p, maccs_p, cnt_p)
     z = lambda s: (s - s.mean()) / (s.std() + 1e-6) if len(s) > 1 else s * 0
     fused = z(ll) + args.w_con * z(con)
+    apf = None
+    if AIDX is not None:
+        an = AIDX.search(specs, target, win=args.analog_win, n_out=args.analog, exclude_key=q['key'], exclude_lib=(None if args.class2 else q.get('lib'))) if q['key'] is not None else AIDX.search(specs, target, win=args.analog_win, n_out=args.analog)
+        an = [(k, v, sh) for k, v, sh in an if k in pool_row]
+        an_bits = np.unpackbits(P_BITS[np.array([pool_row[k] for k, _, _ in an], np.int64)], axis=1)[:, :4096].astype(np.float32) if an else np.zeros((0, 4096), np.float32)
+        apf = anmod.analog_features(yb.cpu().numpy() if torch.is_tensor(yb) else yb, an_bits, np.array([v for _, v, _ in an], np.float32))
+        r['an_top_sim'] = float(an[0][1]) if an else 0.0; r['an_n'] = len(an)
+        if q['key'] is not None:
+            ti = np.where(keys == q['key'])[0]
+            sw = {}
+            for w in W_SWEEP:
+                for base, bn in ((fused, 'fused'), (z(ll), 'll')):
+                    sc_ = base + w * z(apf['ap'])
+                    sw[f'{bn}+{w}'] = (1.0 / (1 + int((sc_ > sc_[ti[0]]).sum()))) if len(ti) else 0.0
+            r['rr_sweep'] = {k_: (v_ if v_ >= 1 / 25 else 0.0) for k_, v_ in sw.items()}
+        if args.w_ap > 0:
+            fused = fused + args.w_ap * z(apf['ap'])
     libsc = np.array([libs.get(k, 0.0) for k in keys], np.float32)
     # analog propagation: Tanimoto of each candidate to the structures of the best library hits (train structures)
     hits = sorted(((v, k) for k, v in libs.items() if v >= 0.3 and k in pool_row), reverse=True)[:8]
@@ -291,6 +316,9 @@ for qi, q in enumerate(queries):
     order = np.array([i for i in order if i in keep])
     rec = dict(keys=keys[order].tolist(), smiles=[smiles[i] for i in order], formula=[formula[i] for i in order], mass=np.array(mass)[order], src=src[order],
                ll=ll[order], con=con[order], fused=fused[order], libsc=libsc[order], analog=analog[order], analog_top=analog_top[order], n_cands=n_all)
+    if apf is not None:
+        for n_, v_ in apf.items():
+            rec[n_] = v_[order]
     for n in POPCOLS:
         rec['pop_' + n] = popf[n][order]
     if args.frag_top > 0:
@@ -309,6 +337,10 @@ for qi, q in enumerate(queries):
 R = pd.DataFrame(results); R.to_pickle(args.out)
 if args.mode == 'val':
     print(R.groupby('set').agg(mrr=('rr', 'mean'), top1=('rr', lambda s: (s == 1).mean()), in_list=('truth_rank', lambda s: (s > 0).mean()), n_pool=('n_pool', 'median'), n_pc=('n_pubchem', 'median'), n=('rr', 'size')))
+    if 'rr_sweep' in R.columns:
+        SW = pd.DataFrame([dict(set=s_, **d_) for s_, d_ in zip(R['set'], R['rr_sweep']) if isinstance(d_, dict)])
+        print('ANALOG SWEEP (MRR@25 over all candidates; base + w * z(ap))'); print(SW.groupby('set').mean().round(4).T.to_string())
+        print('analog top sim median by set', R.groupby('set').an_top_sim.median().round(3).to_dict())
 if args.sub:
     rows = []; n_gate = 0
     for r in results:

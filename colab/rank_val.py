@@ -62,6 +62,12 @@ def build(R, mask_frac):
             t = int(np.argmax(label)); f['truth_pop'] = float(r['pop_lsid'][t] + r['pop_lpmid'][t])
         if 'pop_lsid' in f:
             f['z_pop'] = z(f.pop_lsid.values + f.pop_lpmid.values); f['pop_rank'] = np.argsort(np.argsort(-(f.pop_lsid.values + f.pop_lpmid.values)))
+        for extra in ('ap', 'ap1', 'ap_best_tan', 'ap_top_tan', 'ap_mean_tan'):     # mass-shifted analog channel (analog.py)
+            if extra in r and isinstance(r[extra], np.ndarray) and len(r[extra]) == n:
+                f[extra] = np.asarray(r[extra], np.float32)
+        if 'ap' in f:
+            f['ap_z'] = z(f.ap.values); f['ap_gap'] = f.ap.values.max() - f.ap.values; f['r_ap'] = np.argsort(np.argsort(-f.ap.values))
+            f['an_top_sim'] = float(r.get('an_top_sim', 0.0)); f['ap_x_ll'] = f.ap_z.values * f.z_ll.values
         for extra in ('frag_w', 'frag_e', 'frag_p', 'xenc'):
             if extra in r and r[extra] is not None and np.ndim(r[extra]) == 1:
                 f[extra] = np.asarray(r[extra], np.float32)

@@ -8,6 +8,9 @@
 | 2026-10-26 16:17 | P1 probe (CPU): pool only, spectral fused score, library hits >= 0.8 first, no ranker/simulators | 0.226 | diagnostic |
 | 2026-10-26 16:55 | P2 probe (CPU): P1 + 500 PubChem-window candidates chosen by popularity | 0.184 | PubChem candidates hurt when ranked by spectral score alone |
 | 2026-10-26 17:41 | P3 probe (CPU): P2 + 0.15 x popularity in the score | 0.215 | popularity recovers part of it |
+| 2026-10-28 15:11 | P4 probe: pool only, fingerprint log-lik only, lib gate 0.8 | 0.227 | = P1 fused (0.226): contrastive adds nothing |
+| 2026-10-28 15:12 | P5 probe: pool only, contrastive only, lib gate 0.8 | 0.203 | |
+| 2026-10-28 15:12 | P6 probe: pool only, popularity prior only (spectrum-blind), lib gate 0.8 | 0.170 | our spectral score adds only +0.057 over popularity |
 | 2026-10-25 17:11 | V1 own pipeline: fp_v2 + PubChem window (top-500 by popularity) + GLACIER/ICEBERG + leak-free LambdaRank (kernel casmi26-final v2) | **0.287** | val LB estimate 0.599 -> ratio 0.48: validation was badly miscalibrated |
 
 Public best at hand-over: 0.467 (public notebooks), LB #1 0.504.

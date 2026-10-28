@@ -108,7 +108,7 @@ cmd = f"cd /content/work && python -u infer_fp.py --ckpt {os.environ['CKPT']} --
 print(subprocess.run(cmd, shell=True, capture_output=True, text=True).stdout)
 sub = pd.read_csv('/kaggle/working/submission.csv'); print(sub.shape, sub.smiles.str.count(';').describe()); assert sub.molecule_id.is_unique and sub.smiles.notna().all()
 """
-infer_cells = [code(INFER_SETUP)] + script_cells(['fpmodel.py', 'build_train_cache.py', 'fragscore.py', 'infer_fp.py']) + [code(INFER_CMD)]
+infer_cells = [code(INFER_SETUP)] + script_cells(['fpmodel.py', 'build_train_cache.py', 'fragscore.py', 'analog.py', 'infer_fp.py']) + [code(INFER_CMD)]
 write_kernel(os.path.join(S, 'k_infer_fp'), 'casmi26-infer-fp', 'casmi26-infer-fp', infer_cells, gpu=False,   # CPU: model inference on ~5k spectra is cheap
              kernel_sources=['satyajeetrai/casmi26-cpu-prep-cache-pools-baseline', 'satyajeetrai/casmi26-train-fp', 'satyajeetrai/casmi26-pop'],
              dataset_sources=DS + ['dmitriigluzdov/casmi26-pubchem-popularity-prior'])
@@ -270,7 +270,7 @@ def infer_variant(slug, jobs):
     cmd = "import os, subprocess, shutil\nshutil.copy(find('val_queries_seed0.pkl'), '/content/work/val_queries_seed0.pkl')\n"
     for extra, out in jobs:
         cmd += f"print(subprocess.run(f\"cd /content/work && python -u infer_fp.py --ckpt {{os.environ['CKPT']}} {extra} --out /kaggle/working/{out} 2>&1 | tail -12\", shell=True, capture_output=True, text=True).stdout)\n"
-    cells = [code(INFER_SETUP)] + script_cells(['fpmodel.py', 'build_train_cache.py', 'fragscore.py', 'infer_fp.py']) + [code(cmd)]
+    cells = [code(INFER_SETUP)] + script_cells(['fpmodel.py', 'build_train_cache.py', 'fragscore.py', 'analog.py', 'infer_fp.py']) + [code(cmd)]
     write_kernel(os.path.join(S, 'k_' + slug), 'casmi26-' + slug, 'casmi26-' + slug, cells, gpu=False,
                  kernel_sources=['satyajeetrai/casmi26-cpu-prep-cache-pools-baseline', 'satyajeetrai/casmi26-train-fp', 'satyajeetrai/casmi26-pop'],
                  dataset_sources=DS + ['dmitriigluzdov/casmi26-pubchem-popularity-prior'])
@@ -301,7 +301,7 @@ def rank_variant(slug, files, gls, extra, sources):
         setup += f"shutil.copy(find('{f}'), '/content/work/{f}')\n"
     if '--apply' in extra:
         setup += "shutil.copy(find('ranker.pkl'), '/content/work/ranker_v1.pkl')\n"
-    cmd = (f"import subprocess\nprint(subprocess.run(\"cd /content/work && python -u rank_val.py --scores {','.join(files)} --gl {','.join(gls)} {extra} --out /kaggle/working/ranker.pkl 2>&1 | tail -45\", "
+    cmd = (f"import subprocess\nprint(subprocess.run(\"cd /content/work && python -u rank_val.py --scores {','.join(files)} {('--gl ' + ','.join(gls)) if gls else ''} {extra} --out /kaggle/working/ranker.pkl 2>&1 | tail -45\", "
            "shell=True, capture_output=True, text=True).stdout)\n")
     write_kernel(os.path.join(S, 'k_' + slug), 'casmi26-' + slug, 'casmi26-' + slug, [code(setup)] + script_cells(['fpmodel.py', 'rank_val.py']) + [code(cmd)], gpu=False,
                  kernel_sources=['satyajeetrai/casmi26-cpu-prep-cache-pools-baseline'] + ['satyajeetrai/' + s for s in sources])
@@ -334,7 +334,7 @@ def probe(slug, extra):
            "sub = pd.read_csv('/kaggle/working/submission.csv'); te = pd.read_parquet(sorted(glob.glob('/kaggle/input/**/test.parquet', recursive=True), key=len)[0], columns=['molecule_id'])\n"
            "assert set(sub.molecule_id) == set(te.molecule_id.unique()) and sub.molecule_id.is_unique and sub.smiles.notna().all() and (sub.smiles.str.count(';') <= 24).all(), 'submission invalid'\n"
            "print('OK submission', sub.shape)\n")
-    cells = [code(INFER_SETUP)] + script_cells(['fpmodel.py', 'build_train_cache.py', 'fragscore.py', 'infer_fp.py']) + [code(cmd)]
+    cells = [code(INFER_SETUP)] + script_cells(['fpmodel.py', 'build_train_cache.py', 'fragscore.py', 'analog.py', 'infer_fp.py']) + [code(cmd)]
     write_kernel(os.path.join(S, 'k_' + slug), 'casmi26-' + slug, 'casmi26-' + slug, cells, gpu=False,
                  kernel_sources=['satyajeetrai/casmi26-cpu-prep-cache-pools-baseline', 'satyajeetrai/casmi26-train-fp', 'satyajeetrai/casmi26-pop'],
                  dataset_sources=DS + ['dmitriigluzdov/casmi26-pubchem-popularity-prior'])
@@ -350,3 +350,25 @@ infer_variant('libtok', [('--mode val --pubchem_top 0 --frag_top 0', 'v_c1_np.pk
 probe('probe4-ll', '--pubchem_top 0 --lib_gate 0.8 --sub_score ll')
 probe('probe5-con', '--pubchem_top 0 --lib_gate 0.8 --sub_score con')
 probe('probe6-prior', '--pubchem_top 0 --lib_gate 0.8 --sub_score prior')
+
+# 20) mass-shifted analog channel (CPU): class-2 and class-1 validation, pool only, with the analog weight sweep
+infer_variant('analog-val', [('--mode val --class2 --pubchem_top 0 --frag_top 0 --analog 100', 'v_c2_analog.pkl'),
+                             ('--mode val --pubchem_top 0 --frag_top 0 --analog 100', 'v_c1_analog.pkl')])
+
+# 21) fp_v3: fp_v2 fine-tuned with the same-mass ranking loss on high-quality spectra only (GPU, 2xT4)
+TRAIN_RANK_CMD = r"""import os, glob, subprocess
+RUN = 'fp_v3'; init = sorted(glob.glob('/kaggle/input/**/runs/fp_v2/ema.pt', recursive=True)); print('init', init)
+cmd = f'cd /content/work && PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python -u train_fp.py --out runs/{RUN} --init {init[0]} --epochs 3 --bs 512 --steps_per_epoch 4000 --lr 1e-4 --np_boost 3.0 --w_rank 1.0 --hq --max_hours 2.7 2>&1 | tee -a runs/{RUN}/stdout.log'
+print(cmd); os.makedirs(f'/content/work/runs/{RUN}', exist_ok=True)
+subprocess.run(cmd, shell=True)
+print(open(f'/content/work/runs/{RUN}/log.txt').read()[-6000:])
+"""
+write_kernel(os.path.join(S, 'k_train-fprank'), 'casmi26-train-fprank', 'casmi26-train-fprank',
+             [code(GPU_SETUP)] + script_cells(['fpmodel.py', 'casmi_val.py', 'train_fp.py']) + [code(TRAIN_RANK_CMD), code('!ls -la /kaggle/working/runs/*; du -sh /kaggle/working')],
+             gpu=True, kernel_sources=['satyajeetrai/casmi26-cpu-prep-cache-pools-baseline', 'satyajeetrai/casmi26-train-fp'])
+
+# 22) analog probe: P1 + mass-shifted analog channel (w_ap 0.5) - the only change vs P1
+probe('probe7-analog', '--pubchem_top 0 --lib_gate 0.8 --analog 100 --w_ap 0.5')
+
+# 23) pool-only ranker with the analog channel: CV on class-1 + class-2 records (no PubChem, no simulators)
+rank_variant('rank-analog', ['v_c1_analog.pkl', 'v_c2_analog.pkl'], [], '', ['casmi26-analog-val'])

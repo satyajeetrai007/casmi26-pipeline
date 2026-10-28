@@ -13,6 +13,9 @@ p.add_argument('--steps_per_epoch', type=int, default=3000); p.add_argument('--s
 p.add_argument('--w_con', type=float, default=1.0); p.add_argument('--merge_p', type=float, default=0.3); p.add_argument('--no_holdout', action='store_true')
 p.add_argument('--resume', default=''); p.add_argument('--eval_every', type=int, default=1); p.add_argument('--max_hours', type=float, default=1e9)
 p.add_argument('--init', default='', help='initialise model/molenc weights from an ema.pt (fresh optimiser and schedule)'); p.add_argument('--np_boost', type=float, default=1.0, help='sampling weight multiplier for natural-product libraries')
+p.add_argument('--w_rank', type=float, default=0.0, help='weight of the same-mass ranking loss: true structure vs --rank_k pool structures within 10 ppm, scored by fingerprint logits . bits')
+p.add_argument('--rank_k', type=int, default=63); p.add_argument('--hq', action='store_true', help='train only on high-quality spectra (precursor mass agrees with the structure, >=5 peaks, test adducts, known instrument)')
+p.add_argument('--hq_ppm', type=float, default=10.0)
 args = p.parse_args()
 os.makedirs(args.out, exist_ok=True); torch.manual_seed(args.seed); rng = np.random.default_rng(args.seed)
 dev = 'cuda'; t0 = time.time()
@@ -35,6 +38,20 @@ meta_key = meta.inchikey14.values; meta_prec = meta.precursor_mz.values
 Q = pd.read_pickle(args.val_queries)
 holdout_keys = set(Q.key) if not args.no_holdout else set()
 train_mask = (~np.isin(meta_key, list(holdout_keys))) & (NPK >= 3) & np.isfinite(meta_prec)
+_pool0 = pd.read_parquet('/content/work/pools/pool.parquet', columns=['ik14', 'mass'])
+_prow = pd.Series(np.arange(len(_pool0)), index=_pool0.ik14.values); _prow = _prow[~_prow.index.duplicated()]
+spec_prow = _prow.reindex(meta_key).fillna(-1).values.astype(np.int64)
+sid2prow = np.full(len(structs), -1, np.int64); sid2prow[sid] = spec_prow
+if args.hq:
+    TEST_ADDUCTS = ['[M+H]+', '[M+NH4]+', '[M-H2O+H]+', '[M-2H2O+H]+', '[M+Na]+', '[M+K]+', '[M-H]-', '[M-H2O-H]-', '[M+CH2O2-H]-', '[M+Cl]-']
+    smass = np.where(spec_prow >= 0, _pool0.mass.values[np.maximum(spec_prow, 0)], np.nan)
+    nm0 = meta_prec - M['shift'].astype(np.float64)
+    ppm_ok = np.abs(nm0 - smass) / smass * 1e6 <= args.hq_ppm
+    ad_ok = np.isin(np.asarray(M['adduct']), [ADDUCT_VOCAB.index(a) for a in TEST_ADDUCTS if a in ADDUCT_VOCAB])
+    hq = ppm_ok & (NPK >= 5) & ad_ok & (M['instr'] <= 2)
+    P(f'hq filter: precursor-mass ok {np.mean(ppm_ok[train_mask]):.3f}, >=5 peaks {np.mean((NPK >= 5)[train_mask]):.3f}, test adduct {np.mean(ad_ok[train_mask]):.3f}, known instrument {np.mean((M["instr"] <= 2)[train_mask]):.3f} -> kept {np.mean(hq[train_mask]):.3f}')
+    train_mask &= hq
+del _prow
 N_META = len(meta); del meta
 train_idx = np.where(train_mask)[0]
 cnt_per_struct = np.bincount(sid[train_idx], minlength=len(structs))
@@ -85,6 +102,15 @@ def make_batch(idx, rng):
              cnt=torch.from_numpy(cnt), el=torch.from_numpy(el), s=torch.from_numpy(s))
     for k in ('adduct', 'lib', 'instr', 'mode', 'cef', 'prec'):
         t[k] = torch.from_numpy(M[k][idx])
+    if args.w_rank > 0:
+        pr = sid2prow[s]; m0 = pool_mass[np.maximum(pr, 0)]
+        lo = np.searchsorted(pm_sorted, m0 * (1 - 10e-6)); hi = np.searchsorted(pm_sorted, m0 * (1 + 10e-6), side='right')
+        n = hi - lo; Kn = args.rank_k
+        negs = pm_order[np.minimum(lo[:, None] + (rng.random((B, Kn)) * np.maximum(n, 1)[:, None]).astype(np.int64), len(pm_order) - 1)]
+        rnd = rng.integers(0, len(pool_mass), (B, Kn))
+        small = (n < 8)[:, None] & (np.arange(Kn)[None, :] >= Kn // 2)
+        negs = np.where(small | (n[:, None] <= 1) | (negs == pr[:, None]), rnd, negs)
+        t['prow'] = torch.from_numpy(pr); t['negs'] = torch.from_numpy(negs.astype(np.int64))
     return t
 
 
@@ -142,6 +168,22 @@ def evaluate(model, molenc, tag):
 model = SpecModel(d=args.d, layers=args.layers).to(dev); molenc = MolEncoder(emb=512).to(dev)
 NGPU = torch.cuda.device_count(); model_dp = nn.DataParallel(model) if NGPU > 1 else model; molenc_dp = nn.DataParallel(molenc) if NGPU > 1 else molenc
 print('GPUs', NGPU, flush=True)
+if args.w_rank > 0:
+    PB_GPU = torch.from_numpy(np.ascontiguousarray(P_BITS)).to(dev); SHIFTS = torch.arange(7, -1, -1, device=dev, dtype=torch.uint8)
+    P('ranking loss on: pool bits on GPU', tuple(PB_GPU.shape))
+
+
+def rank_loss(zb, prow, negs):
+    ok = prow >= 0
+    if not bool(ok.any()):
+        return torch.zeros((), device=dev)
+    zb, cand = zb[ok].float(), torch.cat([prow[ok, None], negs[ok]], 1)
+    out = []
+    for c0 in range(0, len(cand), 128):
+        cb = ((PB_GPU[cand[c0:c0 + 128]].unsqueeze(-1) >> SHIFTS) & 1).reshape(cand[c0:c0 + 128].shape[0], cand.shape[1], -1)[..., :4096].float()
+        out.append(torch.bmm(cb, zb[c0:c0 + 128].unsqueeze(-1)).squeeze(-1))
+    sc = torch.cat(out)
+    return F.cross_entropy(sc, torch.zeros(len(sc), dtype=torch.long, device=dev))
 params = list(model.parameters()) + list(molenc.parameters())
 P('params M', sum(p.numel() for p in params) / 1e6)
 opt = torch.optim.AdamW(params, lr=args.lr, weight_decay=0.05, betas=(0.9, 0.98))
@@ -182,6 +224,8 @@ for ep in range(start_ep, args.epochs):
         logits = logits.masked_fill(same & ~eye, -1e4)
         tgt = torch.arange(len(b['s']), device=dev); l_con = 0.5 * (F.cross_entropy(logits, tgt) + F.cross_entropy(logits.T, tgt))
         loss = l_bits * 10 + l_maccs * 3 + l_cnt + l_el + args.w_con * l_con
+        l_rank = rank_loss(o['bits'], b['prow'], b['negs']) if args.w_rank > 0 else torch.zeros((), device=dev)
+        loss = loss + args.w_rank * l_rank
         opt.zero_grad(set_to_none=True); scaler.scale(loss).backward(); scaler.unscale_(opt); torch.nn.utils.clip_grad_norm_(params, 1.0); scaler.step(opt); scaler.update(); sched.step(); step += 1
         if done % 100 == 0 and (time.time() - t0) / 3600 > args.max_hours:
             P('max_hours reached, stopping epoch early'); break
@@ -192,7 +236,7 @@ for ep in range(start_ep, args.epochs):
                 else: ema[k].copy_(v)
             for k, v in molenc.state_dict().items():
                 if v.dtype.is_floating_point: ema_m[k].mul_(dec).add_(v.detach(), alpha=1 - dec)
-        for k, v in dict(loss=loss, bits=l_bits, maccs=l_maccs, cnt=l_cnt, el=l_el, con=l_con).items():
+        for k, v in dict(loss=loss, bits=l_bits, maccs=l_maccs, cnt=l_cnt, el=l_el, con=l_con, rank=l_rank).items():
             agg[k] = agg.get(k, 0.0) + float(v)
         done += 1
         if done % 500 == 0:
