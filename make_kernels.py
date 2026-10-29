@@ -454,3 +454,33 @@ def probe_gen(slug, extra):
                  kernel_sources=['satyajeetrai/casmi26-cpu-prep-cache-pools-baseline', 'satyajeetrai/casmi26-train-fp', 'satyajeetrai/casmi26-pop'],
                  dataset_sources=DS + ['dmitriigluzdov/casmi26-pubchem-popularity-prior'])
 probe_gen('probe10-gen', '--pubchem_top 0 --lib_gate 0.8 --analog 100 --w_ap 0.5 --gen 6 --gen_pen 0')
+GENV12 = GENV_CMD.replace('--gen 6 --gen_pen 0', '--gen 12 --gen_pen 0')
+def genval12_kernel(slug):
+    cells = [code(INFER_SETUP)] + script_cells(['fpmodel.py', 'build_train_cache.py', 'fragscore.py', 'analog.py', 'derive.py', 'infer_fp.py']) + [code(GENV12)]
+    write_kernel(os.path.join(S, 'k_' + slug), 'casmi26-' + slug, 'casmi26-' + slug, cells, gpu=False,
+                 kernel_sources=['satyajeetrai/casmi26-cpu-prep-cache-pools-baseline', 'satyajeetrai/casmi26-train-fp', 'satyajeetrai/casmi26-pop'],
+                 dataset_sources=DS + ['dmitriigluzdov/casmi26-pubchem-popularity-prior'])
+genval12_kernel('gen-val12')
+probe_gen('probe11-gen12', '--pubchem_top 0 --lib_gate 0.8 --analog 100 --w_ap 0.5 --gen 12 --gen_pen 0')
+
+# 30) generator variants on saved records (CPU, fast): edit set, parents, steps
+GENX_CMD = r'''import os, subprocess, shutil, glob
+prev = glob.glob('/kaggle/input/**/v_c2_anl.pkl', recursive=True); shutil.copy(prev[0], '/kaggle/working/v_c2_anl.pkl')
+for mod, npar, steps in (('derive', 12, 2), ('derive2', 12, 2), ('derive2', 20, 2), ('derive2', 12, 3)):
+    print('=====', mod, 'parents', npar, 'steps', steps, flush=True)
+    print(subprocess.run(f'cd /content/work && timeout 5400 python -u gen_oracle.py --records /kaggle/working/v_c2_anl.pkl --module {mod} --n_parents {npar} --steps {steps} --skip_oracle --out /kaggle/working/genx_{mod}_{npar}_{steps}.pkl 2>&1 | grep -v Warning | tail -12', shell=True, capture_output=True, text=True).stdout, flush=True)
+'''
+def genx_kernel(slug):
+    cells = [code(INFER_SETUP)] + script_cells(['derive.py', 'derive2.py', 'gen_oracle.py']) + [code(GENX_CMD)]
+    write_kernel(os.path.join(S, 'k_' + slug), 'casmi26-' + slug, 'casmi26-' + slug, cells, gpu=False,
+                 kernel_sources=['satyajeetrai/casmi26-cpu-prep-cache-pools-baseline', 'satyajeetrai/casmi26-train-fp', 'satyajeetrai/casmi26-gen-oracle'],
+                 dataset_sources=DS)
+genx_kernel('gen-x')
+GENF = GENV_CMD.replace('--gen 6 --gen_pen 0', '--gen 12 --gen_pen 0 --frag_gen 40').replace("(('', 'v_c2_gen.pkl'), ('--truth_pubchem', 'v_c3_gen.pkl'))", "(('--truth_pubchem', 'v_c3_genf.pkl'), ('', 'v_c2_genf.pkl'))")
+def genf_kernel(slug):
+    cells = [code(INFER_SETUP)] + script_cells(['fpmodel.py', 'build_train_cache.py', 'fragscore.py', 'analog.py', 'derive.py', 'infer_fp.py']) + [code(GENF)]
+    write_kernel(os.path.join(S, 'k_' + slug), 'casmi26-' + slug, 'casmi26-' + slug, cells, gpu=False,
+                 kernel_sources=['satyajeetrai/casmi26-cpu-prep-cache-pools-baseline', 'satyajeetrai/casmi26-train-fp', 'satyajeetrai/casmi26-pop'],
+                 dataset_sources=DS + ['dmitriigluzdov/casmi26-pubchem-popularity-prior'])
+genf_kernel('gen-frag')
+probe_gen('probe12-genins2', '--pubchem_top 0 --lib_gate 0.8 --analog 100 --w_ap 0.5 --gen 12 --gen_pen 0 --gen_insert 2')

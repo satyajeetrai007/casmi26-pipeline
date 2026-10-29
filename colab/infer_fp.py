@@ -17,7 +17,7 @@ p.add_argument('--limit', type=int, default=0); p.add_argument('--class2', actio
 p.add_argument('--truth_pubchem', action='store_true', help='val: also remove the truth from the pool so it can only re-enter through the PubChem window (test-like class 2)')
 p.add_argument('--pc_select', default='fp', choices=['fp', 'pop']); p.add_argument('--pc_pop_union', type=int, default=100); p.add_argument('--pc_cap', type=int, default=20000)
 p.add_argument('--sub_score', default='fused', choices=['fused', 'll', 'con', 'prior'], help='submission base score: fused, fingerprint log-lik only, contrastive only, or popularity prior only (spectrum-blind)')
-p.add_argument('--gen', type=int, default=0, help='class-3 channel: derivatives of the top --gen spectral analogs (needs --analog)'); p.add_argument('--gen_pen', type=float, default=1.0, help='fused -= gen_pen for generated candidates'); p.add_argument('--gen_min_sim', type=float, default=0.3)
+p.add_argument('--gen', type=int, default=0, help='class-3 channel: derivatives of the top --gen spectral analogs (needs --analog)'); p.add_argument('--gen_pen', type=float, default=1.0, help='fused -= gen_pen for generated candidates'); p.add_argument('--gen_min_sim', type=float, default=0.3); p.add_argument('--frag_gen', type=int, default=0); p.add_argument('--gen_insert', default='', help='submission: non-generated order with our best generated candidates inserted at these ranks, e.g. 2')
 p.add_argument('--analog', type=int, default=0, help='mass-shifted analog search: number of analogs per molecule (0 = off)'); p.add_argument('--w_ap', type=float, default=0.0, help='fused += w_ap * z(analog propagation ap)')
 p.add_argument('--analog_win', type=float, default=200.0)
 p.add_argument('--ap_power', type=float, default=4.0)
@@ -376,6 +376,16 @@ for qi, q in enumerate(queries):
         fw = np.full(len(order), np.nan, np.float32); fe = fw.copy(); fp_ = fw.copy()
         fw[:len(fr)] = [x[0] for x in fr]; fe[:len(fr)] = [x[1] for x in fr]; fp_[:len(fr)] = [x[2] for x in fr]
         rec.update(frag_w=fw, frag_e=fe, frag_p=fp_)
+    if args.frag_gen > 0 and rec['is_gen'].sum() > 0:
+        sp = [dict(mz=s['mz'], it=s['it'], adduct=s['adduct'], mode=s['mode']) for s in specs]
+        gi = np.where(rec['is_gen'] > 0)[0][:args.frag_gen]
+        ti_ = [i for i in range(len(order)) if rec['keys'][i] == q['key']] if q['key'] is not None else []
+        pi = [i for i in range(len(order)) if rec['is_gen'][i] == 0][:5] + [i for i in ti_ if rec['is_gen'][i] == 0]
+        idx_ = list(dict.fromkeys(list(gi) + pi))
+        fr = POOL_MP.map(_frag_job, [(rec['smiles'][i], sp) for i in idx_], chunksize=2)
+        fg = np.full((len(order), 3), np.nan, np.float32)
+        for i, x in zip(idx_, fr): fg[i] = x[:3]
+        rec['frag_gen'] = fg
     r.update(rec)
     if q['key'] is not None:
         r['rr'] = next((1.0 / (i + 1) for i, k in enumerate(rec['keys'][:25]) if k == q['key']), 0.0)
@@ -413,6 +423,12 @@ if args.sub:
                 ls = np.asarray(r['libsc'], np.float64); g = ls >= args.lib_gate; n_gate += int(g.any())
                 sc = np.where(g, 1e6 + ls, sc)
             o = np.argsort(-sc, kind='stable'); keys_ = [keys_[i] for i in o]; smis_ = [smis_[i] for i in o]
+            if args.gen_insert and 'is_gen' in r:
+                ig = np.asarray(r['is_gen'])[o] > 0; ng = [j for j in range(len(o)) if not ig[j]]; gg = [j for j in range(len(o)) if ig[j]]
+                seq = list(ng)
+                for pos, j in zip([int(x) for x in args.gen_insert.split(',')], gg):
+                    seq.insert(max(0, min(pos - 1, len(seq))), j)
+                keys_ = [keys_[j] for j in seq]; smis_ = [smis_[j] for j in seq]
         for k, s in zip(keys_, smis_):
             if k in seen: continue
             seen.add(k); out.append(s)

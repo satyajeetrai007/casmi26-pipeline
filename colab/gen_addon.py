@@ -10,9 +10,9 @@ usage: python gen_addon.py --budget SECONDS [--pos 2] [--gate none|lib]
 import os, sys, glob, json, time, argparse, subprocess, shutil
 import numpy as np, pandas as pd
 
-p = argparse.ArgumentParser(); p.add_argument('--budget', type=float, required=True); p.add_argument('--pos', type=int, default=2)
+p = argparse.ArgumentParser(); p.add_argument('--budget', type=float, required=True); p.add_argument('--pos', default='2', help='comma list of ranks for our 1st, 2nd, ... generated candidates')
 p.add_argument('--gate', default='none'); p.add_argument('--sub', default='/kaggle/working/submission.csv'); p.add_argument('--gen', type=int, default=12)
-args = p.parse_args(); T0 = time.time()
+args = p.parse_args(); T0 = time.time(); POS = [int(x) for x in str(args.pos).split(',')]
 
 
 def ours(pat):
@@ -80,16 +80,19 @@ for mid, smi in zip(sub.molecule_id, sub.smiles):
     if not g.any():
         new.append(smi); n_nogen += 1; continue
     have = {ik(s) for s in L} | set(L)
-    pick = None
+    picks = []
     for i in np.where(g)[0]:                      # records are in our fused order
         s = r['smiles'][i]
         if s not in have and r['keys'][i] not in have:
-            pick = s; break
-    if pick is None:
+            picks.append(s); have.add(s)
+        if len(picks) >= len(POS):
+            break
+    if not picks:
         new.append(smi); continue
-    k = max(1, min(args.pos - 1, len(L)))
-    L = (L[:k] + [pick] + L[k:])[:25]
-    new.append(';'.join(L)); n_ins += 1
+    for pos, s in zip(POS, picks):
+        k = max(1, min(pos - 1, len(L)))
+        L = L[:k] + [s] + L[k:]
+    new.append(';'.join(L[:25])); n_ins += 1
 out = pd.DataFrame(dict(molecule_id=sub.molecule_id, smiles=new))
 assert out.molecule_id.tolist() == sub.molecule_id.tolist()
 assert out.smiles.str.split(';').map(len).between(1, 25).all()

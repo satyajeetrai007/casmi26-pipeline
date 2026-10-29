@@ -7,12 +7,13 @@ import argparse, time, numpy as np, pandas as pd
 from multiprocessing import Pool
 from rdkit import Chem, RDLogger
 RDLogger.DisableLog('rdApp.*')
-import derive as dv
+import importlib
 
 p = argparse.ArgumentParser(); p.add_argument('--records', required=True); p.add_argument('--out', default='gen_oracle.pkl')
 p.add_argument('--n_parents', type=int, default=6); p.add_argument('--min_sim', type=float, default=0.3); p.add_argument('--steps', type=int, default=2)
-p.add_argument('--pools', default='/content/work/pools'); p.add_argument('--workers', type=int, default=4)
+p.add_argument('--pools', default='/content/work/pools'); p.add_argument('--workers', type=int, default=4); p.add_argument('--module', default='derive'); p.add_argument('--skip_oracle', action='store_true')
 args = p.parse_args()
+dv = importlib.import_module(args.module)
 
 pool = pd.read_parquet(f'{args.pools}/pool.parquet'); PB = np.load(f'{args.pools}/fp_morgan4096.npy', mmap_mode='r')
 key = pool.ik14.values; smi = pool.smiles.values; mass = pool.mass.values.astype(np.float64); row = {k: i for i, k in enumerate(key)}
@@ -73,7 +74,7 @@ for _, r in R.iterrows():
         continue
     M = mass[row[k]]
     an = [(a, v) for a, v, _ in (r.get('an_list') if isinstance(r.get('an_list'), list) else []) if v >= args.min_sim and a in row and a != k][:args.n_parents]
-    orc = oracle_parents(k, args.n_parents)
+    orc = [] if args.skip_oracle else oracle_parents(k, args.n_parents)
     parents = dict(A=[(smi[row[a]], mass[row[a]]) for a, _ in an], B=[(smi[row[a]], mass[row[a]]) for a, _ in orc])
     jobs.append((r['id'], k, smi[row[k]], M, parents))
     meta.append(dict(id=r['id'], set=r['set'], an_top_sim=r.get('an_top_sim', 0.0), n_par_A=len(an), tanB=orc[0][1] if orc else 0.0))
