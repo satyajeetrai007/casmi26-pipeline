@@ -484,3 +484,21 @@ def genf_kernel(slug):
                  dataset_sources=DS + ['dmitriigluzdov/casmi26-pubchem-popularity-prior'])
 genf_kernel('gen-frag')
 probe_gen('probe12-genins2', '--pubchem_top 0 --lib_gate 0.8 --analog 100 --w_ap 0.5 --gen 12 --gen_pen 0 --gen_insert 2')
+
+# 31) test of the second-opinion add-on on a 400-row list file (CPU)
+FUSET_CMD = r'''import os, glob, shutil, subprocess
+os.makedirs('/kaggle/tmp/work', exist_ok=True)
+src = [p for p in glob.glob('/kaggle/input/**/submission.csv', recursive=True) if 'probe9' in p or 'final-p9' in p or 'probe10' in p][0]; print('lists from', src)
+shutil.copy(src, '/kaggle/working/submission.csv')
+r = subprocess.run('cd /content/work && python -u fuse_addon.py --budget 5000 --w 0.5', shell=True, capture_output=True, text=True); print(r.stdout[-4000:]); print(r.stderr[-3000:])
+import pandas as pd
+a = pd.read_csv('/kaggle/working/public_lists.csv', dtype=str, keep_default_na=False); b = pd.read_csv('/kaggle/working/submission.csv', dtype=str, keep_default_na=False)
+print('lists changed', int((a.smiles != b.smiles).sum()), 'leaders changed', int((a.smiles.str.split(';').str[0] != b.smiles.str.split(';').str[0]).sum()))
+'''
+def fuset_kernel(slug):
+    cells = [code("import os\nos.makedirs('/kaggle/tmp/work', exist_ok=True)\nos.makedirs('/content', exist_ok=True)\nos.path.exists('/content/work') or os.symlink('/kaggle/tmp/work', '/content/work')\nimport subprocess, sys, glob\ntry:\n    import rdkit\nexcept ImportError:\n    tag = f'cp{sys.version_info.major}{sys.version_info.minor}'\n    whl = sorted(glob.glob(f'/kaggle/input/**/rdkit-2026.3.3-{tag}-*.whl', recursive=True)); subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-q', '--no-index', '--no-deps', whl[0]])\n")] + \
+            script_cells(['fpmodel.py', 'build_train_cache.py', 'fragscore.py', 'analog.py', 'derive.py', 'infer_fp.py', 'gen_addon.py', 'fuse_addon.py']) + [code(FUSET_CMD)]
+    write_kernel(os.path.join(S, 'k_' + slug), 'casmi26-' + slug, 'casmi26-' + slug, cells, gpu=False,
+                 kernel_sources=['satyajeetrai/casmi26-cpu-prep-cache-pools-baseline', 'satyajeetrai/casmi26-train-fp', 'satyajeetrai/casmi26-pop', 'satyajeetrai/casmi26-probe10-gen'],
+                 dataset_sources=DS + ['dmitriigluzdov/casmi26-pubchem-popularity-prior'])
+fuset_kernel('fuse-test')

@@ -1,18 +1,21 @@
 import json, glob, os, sys
 S = os.path.dirname(os.path.abspath(__file__)); SRC = os.path.join(S, 'colab')
-POS = int(sys.argv[1]) if len(sys.argv) > 1 else 2; GATE = sys.argv[2] if len(sys.argv) > 2 else 'none'; SLUG = sys.argv[3] if len(sys.argv) > 3 else 'casmi26-m477-gen'
+POS = sys.argv[1] if len(sys.argv) > 1 else '2'; GATE = sys.argv[2] if len(sys.argv) > 2 else 'none'; SLUG = sys.argv[3] if len(sys.argv) > 3 else 'casmi26-m477-gen'; ADDON = sys.argv[4] if len(sys.argv) > 4 else 'gen'; FAST = len(sys.argv) > 5 and sys.argv[5] == 'fast'
+ADDON_ARGS = f'--pos {POS} --gate {GATE}' if ADDON == 'gen' else f'--w {GATE}'
 base = json.load(open(glob.glob(os.path.join(S, 'pub/m477/*.ipynb'))[0], encoding='utf8'))
 meta = json.load(open(os.path.join(S, 'pub/m477/kernel-metadata.json'), encoding='utf8'))
 def code(src): return {"cell_type": "code", "metadata": {}, "source": src, "outputs": [], "execution_count": None}
 def md(src): return {"cell_type": "markdown", "metadata": {}, "source": src}
 cells = [dict(c, outputs=[], execution_count=None) if c['cell_type'] == 'code' else c for c in base['cells']]
+if FAST:
+    src = ''.join(cells[1]['source']); assert "COMMIT_MODE = 'smoke'" in src; cells[1]['source'] = src.replace("COMMIT_MODE = 'smoke'", "COMMIT_MODE = 'fast'")
 cells.insert(0, md("# Fork of busyaprime's LB 0.477 notebook + our class-3 derivative channel\n\n"
                    "Everything above our add-on is the public 0.477 notebook unchanged (Apache-2.0 code; credits in its section 8). "
                    f"Our add-on (last cells): our own fingerprint model, mass-shifted analog search and a derivative generator "
-                   f"(methyl / hydroxyl / sugar / acyl / prenyl edits of the top analogs); our best generated candidate is inserted at rank {POS}, rank 1 untouched."))
+                   f"(methyl / hydroxyl / sugar / acyl / prenyl edits of the top analogs); see the add-on cells at the end; rank 1 untouched."))
 cells.append(md("## Our add-on: generated derivatives of spectral analogs (class-3 candidates)"))
 cells.append(code("import os\nos.makedirs('/kaggle/tmp/work', exist_ok=True)\nif not os.path.exists('/content/work'):\n    os.makedirs('/content', exist_ok=True); os.symlink('/kaggle/tmp/work', '/content/work')\nprint('work dir ready')"))
-for n in ['fpmodel.py', 'build_train_cache.py', 'fragscore.py', 'analog.py', 'derive.py', 'infer_fp.py', 'gen_addon.py']:
+for n in ['fpmodel.py', 'build_train_cache.py', 'fragscore.py', 'analog.py', 'derive.py', 'infer_fp.py', 'gen_addon.py', 'fuse_addon.py']:
     cells.append(code(f'%%writefile /content/work/{n}\n' + open(os.path.join(SRC, n), encoding='utf-8').read()))
 cells.append(code(f"""import os, time, json, shutil, subprocess, traceback
 import pandas as pd
@@ -25,7 +28,7 @@ if _left < 3300:
     GEN_REPORT['status'] = 'skipped: runtime budget'
 else:
     try:
-        _r = subprocess.run(f'cd /content/work && python -u gen_addon.py --budget {{int(_left - 900)}} --pos {POS} --gate {GATE}', shell=True,
+        _r = subprocess.run(f'cd /content/work && python -u {ADDON}_addon.py --budget {{int(_left - 900)}} {ADDON_ARGS}', shell=True,
                             capture_output=True, text=True, timeout=max(120, _left - 600))
         print(_r.stdout[-3000:]); print(_r.stderr[-2000:])
         GEN_REPORT = json.load(open(_root / 'gen_addon_report.json')) if _r.returncode == 0 and (_root / 'gen_addon_report.json').is_file() else dict(status='failed', rc=_r.returncode)

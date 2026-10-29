@@ -17,7 +17,7 @@ p.add_argument('--limit', type=int, default=0); p.add_argument('--class2', actio
 p.add_argument('--truth_pubchem', action='store_true', help='val: also remove the truth from the pool so it can only re-enter through the PubChem window (test-like class 2)')
 p.add_argument('--pc_select', default='fp', choices=['fp', 'pop']); p.add_argument('--pc_pop_union', type=int, default=100); p.add_argument('--pc_cap', type=int, default=20000)
 p.add_argument('--sub_score', default='fused', choices=['fused', 'll', 'con', 'prior'], help='submission base score: fused, fingerprint log-lik only, contrastive only, or popularity prior only (spectrum-blind)')
-p.add_argument('--gen', type=int, default=0, help='class-3 channel: derivatives of the top --gen spectral analogs (needs --analog)'); p.add_argument('--gen_pen', type=float, default=1.0, help='fused -= gen_pen for generated candidates'); p.add_argument('--gen_min_sim', type=float, default=0.3); p.add_argument('--frag_gen', type=int, default=0); p.add_argument('--gen_insert', default='', help='submission: non-generated order with our best generated candidates inserted at these ranks, e.g. 2')
+p.add_argument('--gen', type=int, default=0, help='class-3 channel: derivatives of the top --gen spectral analogs (needs --analog)'); p.add_argument('--gen_pen', type=float, default=1.0, help='fused -= gen_pen for generated candidates'); p.add_argument('--gen_min_sim', type=float, default=0.3); p.add_argument('--frag_gen', type=int, default=0); p.add_argument('--cands_csv', default='', help='score these lists (molecule_id, smiles ;-joined) instead of the pool'); p.add_argument('--gen_insert', default='', help='submission: non-generated order with our best generated candidates inserted at these ranks, e.g. 2')
 p.add_argument('--analog', type=int, default=0, help='mass-shifted analog search: number of analogs per molecule (0 = off)'); p.add_argument('--w_ap', type=float, default=0.0, help='fused += w_ap * z(analog propagation ap)')
 p.add_argument('--analog_win', type=float, default=200.0)
 p.add_argument('--ap_power', type=float, default=4.0)
@@ -254,6 +254,9 @@ def _frag_job(a):
 
 
 import multiprocessing as mp
+CANDS = None
+if args.cands_csv:
+    _c = pd.read_csv(args.cands_csv, dtype=str, keep_default_na=False); CANDS = {m: s.split(';') for m, s in zip(_c.molecule_id, _c.smiles)}
 POOL_MP = mp.get_context('fork').Pool(args.nproc)
 results = []
 for qi, q in enumerate(queries):
@@ -275,6 +278,14 @@ for qi, q in enumerate(queries):
             col = {'np': 'np_flag'}.get(n, n)
             if col in POOL_POP.columns: popf[n] = POOL_POP[col].values[cidx].astype(np.float32)
     r['n_pubchem'] = 0
+    if CANDS is not None:                       # score a given candidate list (e.g. another pipeline's answers) instead of the pool
+        cs = CANDS.get(q['id'], [])
+        fr = fp_worker(cs) if cs else None
+        ok_ = [i for i in range(len(cs)) if fr[5][i] and len(fr[6][i]) == 14] if cs else []
+        keys = [fr[6][i] for i in ok_]; smiles = [cs[i] for i in ok_]; formula = [fr[4][i] for i in ok_]; mass = [float(fr[3][i]) for i in ok_]; src = [64] * len(ok_)
+        bits_p = fr[0][ok_] if ok_ else bits_p[:0]; maccs_p = fr[1][ok_] if ok_ else maccs_p[:0]; cnt_p = fr[2][ok_] if ok_ else cnt_p[:0]
+        popf = {n: np.zeros(len(ok_), np.float32) for n in POPCOLS}
+        r['cand_rank'] = [cs.index(s_) + 1 for s_ in smiles]
     if args.pubchem_top > 0:
         w = pubchem_window(target, set(keys), pb)
         if w is not None and len(w['keys']):

@@ -42,3 +42,6 @@
 - 2026-10-29 **P12 = 0.248** (P7 0.264): even one generated derivative at rank 2 costs -0.016 -> the derivative family does not transfer to the hidden test (validation said +0.03..+0.08). Family killed (early-kill rule); the fork ships without it.
 - 2026-10-29 casmi26-m477-gen smoke run: the fork + our add-on runs end to end in the public image (add-on 1452 s, 346/400 lists touched) - infrastructure works for future add-ons.
 - 2026-10-29 F0 = private fork of the public 0.477 notebook, unchanged except fast commit (casmi26-m477-plain v1), submitted to bank ~0.477.
+- 2026-10-29 mistake: F0 (unchanged 0.477 fork) spent a submission on a known score. Rule saved: the first fork submission always carries an experiment.
+- 2026-10-29 fuse-test (CPU): colab/fuse_addon.py (infer_fp --cands_csv scores another pipeline's lists with our fp_v2 + analog channel; ranks 2-25 re-ordered by 1/(3+public rank) + 0.5/(3+our rank)) runs in 1833 s on 400 lists, changes 359 lists, 0 leaders.
+- 2026-10-29 F1 = 0.477 fork + fuse add-on (casmi26-m477-fuse v1, fast commit), submitted.
