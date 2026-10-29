@@ -38,3 +38,7 @@
 - 2026-10-29 local checks: rank-1 insertion when our best generated candidate beats every pool candidate ~+0.01 (noise); 2nd/3rd generated at ranks 6/12 +0.002.
 - 2026-10-29 started P12 (CPU probe): P7 order + best generated candidate inserted at rank 2 only = the exact rule of the fork add-on, measured on our lists. Decides whether the fork ships with or without the add-on.
 - 2026-10-29 gen-x (truth generated from spectral analogs, val, truth spectra hidden): derive 12 parents S1 0.492 / S2 0.048 / S3 0.212 (median 12 products); derive2 (+18 edits) 0.532 / 0.054 / 0.230 (18); derive2 20 parents 0.560 / 0.060 / 0.253 (24); derive2 3 steps 0.576 / 0.090 / 0.273 (164 products, ~10x decoys). Only matters if P12 shows the channel transfers.
+- 2026-10-29 **P9 = 0.315** (P7 0.264, +0.051): GLACIER/ICEBERG same-formula re-score of the top 40 (z + z + z, fixed weights) + tautomer-identity dedupe. Best own pipeline so far (V1 0.287).
+- 2026-10-29 **P12 = 0.248** (P7 0.264): even one generated derivative at rank 2 costs -0.016 -> the derivative family does not transfer to the hidden test (validation said +0.03..+0.08). Family killed (early-kill rule); the fork ships without it.
+- 2026-10-29 casmi26-m477-gen smoke run: the fork + our add-on runs end to end in the public image (add-on 1452 s, 346/400 lists touched) - infrastructure works for future add-ons.
+- 2026-10-29 F0 = private fork of the public 0.477 notebook, unchanged except fast commit (casmi26-m477-plain v1), submitted to bank ~0.477.
