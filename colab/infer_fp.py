@@ -20,6 +20,7 @@ p.add_argument('--sub_score', default='fused', choices=['fused', 'll', 'con', 'p
 p.add_argument('--gen', type=int, default=0, help='class-3 channel: derivatives of the top --gen spectral analogs (needs --analog)'); p.add_argument('--gen_pen', type=float, default=1.0, help='fused -= gen_pen for generated candidates'); p.add_argument('--gen_min_sim', type=float, default=0.3); p.add_argument('--frag_gen', type=int, default=0); p.add_argument('--cands_csv', default='', help='score these lists (molecule_id, smiles ;-joined) instead of the pool'); p.add_argument('--gen_insert', default='', help='submission: non-generated order with our best generated candidates inserted at these ranks, e.g. 2')
 p.add_argument('--analog', type=int, default=0, help='mass-shifted analog search: number of analogs per molecule (0 = off)'); p.add_argument('--w_ap', type=float, default=0.0, help='fused += w_ap * z(analog propagation ap)')
 p.add_argument('--analog_win', type=float, default=200.0)
+p.add_argument('--h400', default='', help='hard400 fixture dir: queries are its train rows; library/analogs hide rows the fixture removes; class-3 truth structures leave the pool')
 p.add_argument('--ap_power', type=float, default=4.0)
 p.add_argument('--demote_train', type=float, default=0.0, help='submission order: when the best library match is below this cosine, training structures go after all other candidates (class-2/3 answers are never training structures)')
 p.add_argument('--np_lib_as', default='', help="encode spectra whose library token is 'enveda-np-examples' as this library instead (its embedding is untrained when S1 is held out)")
@@ -72,6 +73,21 @@ meta = pd.read_parquet(f'{CACHE}/spec_meta.parquet', columns=['inchikey14', 'add
 MZ = np.load(f'{CACHE}/peaks_mz.npy', mmap_mode='r'); IT = np.load(f'{CACHE}/peaks_int.npy', mmap_mode='r'); NPK = np.load(f'{CACHE}/n_peaks.npy')
 shift_all = np.array([ADDUCT_SHIFT.get(x, np.nan) for x in meta.adduct.values]); nm_all = meta.precursor_mz.values - shift_all
 lib_ok = meta.adduct.isin(TEST_ADDUCTS).values & np.isfinite(nm_all) & (NPK >= 3)
+H400_ABSENT = set()
+if args.h400:                                   # same keep rule as the fixture's train.parquet, plus class-2/3 truth spectra hidden
+    import json as _json
+    _plan = _json.load(open(f'{args.h400}/visibility.json'))
+    _cls = {str(k): int(v) for k, v in _plan['classes'].items()}
+    _alias_all = {a_ for al in _plan['aliases'].values() for a_ in al}
+    H400_ABSENT = {a_ for k, al in _plan['aliases'].items() if _cls[k] == 3 for a_ in al}
+    _hide = meta.inchikey14.astype(str).isin(_alias_all).values.copy()
+    _rows = np.asarray(sorted(set(_plan['query_rows']) | set(_plan['panel_rows'])), np.int64); _hide[_rows[_rows < len(meta)]] = True
+    _refs = np.asarray(_plan['class1_reference_rows'], np.int64); _refs = _refs[_refs < len(meta)]
+    _no_lib = meta.inchikey14.astype(str).isin({a_ for k, al in _plan['aliases'].items() if _cls[k] != 1 for a_ in al}).values
+    _keep_ref = np.zeros(len(meta), bool); _keep_ref[_refs] = True
+    _hide = (_hide & ~_keep_ref) | _no_lib
+    print('h400: hidden library spectra', int(_hide.sum()), 'class-1 references kept', int((_keep_ref & ~_no_lib).sum()), 'class-3 structures', len(H400_ABSENT), flush=True)
+    lib_ok = lib_ok & ~_hide
 lib_idx = np.where(lib_ok)[0]; o = np.argsort(nm_all[lib_idx]); lib_idx = lib_idx[o]; lib_nm = nm_all[lib_idx]
 lib_key = meta.inchikey14.values[lib_idx]; lib_lib = meta.ingest_lib.values[lib_idx]; lib_mode = meta.ionization_mode.values[lib_idx]
 print('library', len(lib_idx), f'{time.time()-t0:.0f}s', flush=True)
@@ -144,7 +160,18 @@ def val_queries():
     return qs
 
 
-queries = test_queries() if args.mode == 'test' else val_queries()
+def h400_queries():
+    S_ = pd.read_csv(f'{args.h400}/sampling.csv'); qs = []
+    for r_ in S_.itertuples():
+        specs = []
+        for i in [int(x) for x in str(r_.query_source_rows).split(';')]:
+            n = int(NPK[i]); specs.append(dict(mz=np.asarray(MZ[i, :n], np.float64), it=np.asarray(IT[i, :n], np.float64), adduct=meta.adduct.values[i], mode=meta.ionization_mode.values[i],
+                                             lib='enveda-np-examples', instr=meta.instrument_type.values[i], ce_mean=float(meta.ce_mean.values[i]), ce_n=int(meta.ce_n.values[i]), prec=float(meta.precursor_mz.values[i])))
+        qs.append(dict(id=r_.molecule_id, specs=specs, key=None, exclude=(), set=f'c{int(r_.eval_class)}'))
+    return qs
+
+
+queries = h400_queries() if args.h400 else (test_queries() if args.mode == 'test' else val_queries())
 if args.np_lib_as:
     n_sw = 0
     for q_ in queries:
@@ -264,6 +291,8 @@ for qi, q in enumerate(queries):
     lo, hi = np.searchsorted(pm_sorted, [target * (1 - args.ppm * 1e-6), target * (1 + args.ppm * 1e-6)]); cidx = pm_order[lo:hi]
     if args.truth_pubchem and q['key'] is not None:
         cidx = cidx[pool_key[cidx] != q['key']]
+    if H400_ABSENT:
+        cidx = cidx[~np.isin(pool_key[cidx], list(H400_ABSENT))]
     r = dict(id=q['id'], set=q.get('set'), key=q['key'], mass=target, n_pool=len(cidx), n_spec=len(specs), truth_pubchem=bool(args.truth_pubchem), pc_select=args.pc_select)
     libs = lib_search(specs, target, exclude_key=q['key'], exclude_lib=(None if args.class2 else q.get('lib')), exclude_idx=q['exclude']) if q['key'] is not None else lib_search(specs, target)
     r['class2'] = bool(args.class2)
@@ -287,7 +316,7 @@ for qi, q in enumerate(queries):
         popf = {n: np.zeros(len(ok_), np.float32) for n in POPCOLS}
         r['cand_rank'] = [cs.index(s_) + 1 for s_ in smiles]
     if args.pubchem_top > 0:
-        w = pubchem_window(target, set(keys), pb)
+        w = pubchem_window(target, set(keys) | H400_ABSENT, pb)
         if w is not None and len(w['keys']):
             r['n_pubchem'] = len(w['keys']); r['n_pubchem_window'] = w['n_window']
             chunks = [w['smiles'][i:i + 100] for i in range(0, len(w['smiles']), 100)]
@@ -301,7 +330,7 @@ for qi, q in enumerate(queries):
     an = None
     if AIDX is not None:
         an = AIDX.search(specs, target, win=args.analog_win, n_out=args.analog, exclude_key=q['key'], exclude_lib=(None if args.class2 else q.get('lib'))) if q['key'] is not None else AIDX.search(specs, target, win=args.analog_win, n_out=args.analog)
-        an = [(k, v, sh) for k, v, sh in an if k in pool_row]
+        an = [(k, v, sh) for k, v, sh in an if k in pool_row and k not in H400_ABSENT]
     is_gen = np.zeros(len(keys), np.float32); gen_sim = np.zeros(len(keys), np.float32); r['n_gen'] = 0
     if args.gen > 0 and an:
         par = [(k, v) for k, v, _ in an if v >= args.gen_min_sim][:args.gen]

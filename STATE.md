@@ -15,7 +15,8 @@
 | 2026-10-28 ~19:00 | P8 probe: P7 + training structures demoted when library match < 0.8 | 0.230 | dead end: weak-library-match answers are often training structures |
 | 2026-10-29 14:23 | P9: P7 + GLACIER/ICEBERG same-formula re-score (top 40) + tautomer dedupe (casmi26-final-p9 v2) | **0.315** | best own pipeline |
 | 2026-10-29 15:19 | P12: P7 + best generated derivative at rank 2 only | 0.248 | derivative family killed |
-| 2026-10-29 ~16:00 | F0: private fork of public 0.477 notebook, unchanged (casmi26-m477-plain v1) | pending | allowed by comp rules (user 2026-10-29) |
+| 2026-10-29 15:56 | F0: private fork of public 0.477 notebook, unchanged (casmi26-m477-plain v1) | **0.477** | = public; best on account (V0 0.456) |
+| 2026-10-29 16:51 | F1: F0 + our fp_v2/analog re-rank of ranks 2-25 (RRF w 0.5, rank 1 untouched; casmi26-m477-fuse v1) | 0.476 | no gain: ranks 2-25 changes are invisible at 3 decimals |
 | 2026-10-29 14:29 | P10: P7 + generated derivatives of the top-6 analogs, no penalty | 0.232 | derivative channel hurts when mixed in |
 | 2026-10-25 17:11 | V1 own pipeline: fp_v2 + PubChem window (top-500 by popularity) + GLACIER/ICEBERG + leak-free LambdaRank (kernel casmi26-final v2) | **0.287** | val LB estimate 0.599 -> ratio 0.48: validation was badly miscalibrated |
 

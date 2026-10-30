@@ -502,3 +502,62 @@ def fuset_kernel(slug):
                  kernel_sources=['satyajeetrai/casmi26-cpu-prep-cache-pools-baseline', 'satyajeetrai/casmi26-train-fp', 'satyajeetrai/casmi26-pop', 'satyajeetrai/casmi26-probe10-gen'],
                  dataset_sources=DS + ['dmitriigluzdov/casmi26-pubchem-popularity-prior'])
 fuset_kernel('fuse-test')
+
+# 32) hard400 fixture (400 held-out training molecules, test-like masking): our pipeline configs scored on it (CPU)
+H400_PACKED = open(os.path.join(S, 'h400_packed.txt')).read().strip()
+H400_UNPACK = "import base64, io, tarfile, os\nos.makedirs('/kaggle/tmp/h400fix', exist_ok=True)\n" + \
+    "tarfile.open(fileobj=io.BytesIO(base64.b64decode('" + H400_PACKED + "')), mode='r:*').extractall('/kaggle/tmp/h400fix', filter='data')\nprint(os.listdir('/kaggle/tmp/h400fix'))\n"
+H400_CMD = r'''import os, subprocess, shutil, time
+shutil.copy(find('val_queries_seed0.pkl'), '/content/work/val_queries_seed0.pkl')
+def run(cmd):
+    t = time.time(); r = subprocess.run(cmd, shell=True, capture_output=True, text=True); print(r.stdout[-2500:], r.stderr[-2500:], f'[{time.time()-t:.0f}s]', flush=True)
+base = f"cd /content/work && python -u infer_fp.py --ckpt {os.environ['CKPT']} --mode test --h400 /kaggle/tmp/h400fix --frag_top 0"
+JOBS = H400_JOBS
+for name, extra in JOBS:
+    run(f"{base} {extra} --out /kaggle/working/h400_{name}.pkl --sub /kaggle/working/h400_{name}.csv")
+run('cd /content/work && python -u h400_eval.py --fix /kaggle/tmp/h400fix --s1 /content/work/val_queries_seed0.pkl --out /kaggle/working/h400_ranks.csv ' + ' '.join(f'{n}=/kaggle/working/h400_{n}.csv' for n, _ in JOBS))
+'''
+def h400_kernel(slug, jobs, extra_sources=()):
+    cells = [code(INFER_SETUP), code(H400_UNPACK)] + script_cells(['fpmodel.py', 'build_train_cache.py', 'fragscore.py', 'analog.py', 'derive.py', 'infer_fp.py', 'h400_eval.py']) + \
+            [code(H400_CMD.replace('H400_JOBS', repr(jobs)))]
+    write_kernel(os.path.join(S, 'k_' + slug), 'casmi26-' + slug, 'casmi26-' + slug, cells, gpu=False,
+                 kernel_sources=['satyajeetrai/casmi26-cpu-prep-cache-pools-baseline', 'satyajeetrai/casmi26-train-fp', 'satyajeetrai/casmi26-pop'] + list(extra_sources),
+                 dataset_sources=DS + ['dmitriigluzdov/casmi26-pubchem-popularity-prior'])
+h400_kernel('h400-ours', [('p7', '--pubchem_top 0 --lib_gate 0.8 --analog 100 --w_ap 0.5'), ('p1', '--pubchem_top 0 --lib_gate 0.8')])
+
+# 33) hard400: our model + analog channel score the public pipeline's own lists on the fixture (needs casmi26-h400-base output)
+H400C_CMD = r'''import os, glob, shutil, subprocess, tarfile, time
+import pandas as pd
+shutil.copy(find('val_queries_seed0.pkl'), '/content/work/val_queries_seed0.pkl')
+base = [p for p in glob.glob('/kaggle/input/**/submission.csv', recursive=True) if 'h400-base' in p]; print('base outputs', base)
+os.makedirs('/kaggle/working/lists', exist_ok=True)
+shutil.copy(base[0], '/kaggle/working/lists/final.csv')
+for f in glob.glob(os.path.dirname(base[0]) + '/*'):
+    if f.endswith('.csv') or f.endswith('.json'): shutil.copy(f, '/kaggle/working/lists/' + os.path.basename(f))
+tg = glob.glob(os.path.dirname(base[0]) + '/diagnostic-details.tar.gz')
+if tg:
+    t = tarfile.open(tg[0]); names = [n for n in t.getnames() if n.endswith('.csv') and 'submission' in os.path.basename(n)]; print('lists in archive', names)
+    for n in names:
+        t.extract(n, '/kaggle/tmp/lists', filter='data'); shutil.copy('/kaggle/tmp/lists/' + n, '/kaggle/working/lists/' + n.replace('/', '__'))
+L = sorted(glob.glob('/kaggle/working/lists/*.csv')); L = [p for p in L if 'final' in p] + [p for p in L if 'final' not in p]
+U = {}
+for p in L:
+    d = pd.read_csv(p, dtype=str, keep_default_na=False)
+    if list(d.columns[:2]) != ['molecule_id', 'smiles']: continue
+    for m, s in zip(d.molecule_id, d.smiles):
+        u = U.setdefault(m, [])
+        for x in s.split(';'):
+            if x and x not in u: u.append(x)
+pd.DataFrame(dict(molecule_id=list(U), smiles=[';'.join(v) for v in U.values()])).to_csv('/kaggle/working/union.csv', index=False)
+print('union lists', len(U), 'median size', pd.Series([len(v) for v in U.values()]).median(), flush=True)
+def run(cmd):
+    t = time.time(); r = subprocess.run(cmd, shell=True, capture_output=True, text=True); print(r.stdout[-3000:], r.stderr[-2500:], f'[{time.time()-t:.0f}s]', flush=True)
+run(f"cd /content/work && python -u infer_fp.py --ckpt {os.environ['CKPT']} --mode test --h400 /kaggle/tmp/h400fix --frag_top 0 --pubchem_top 0 --analog 100 --w_ap 0.5 --keep 400 --cands_csv /kaggle/working/union.csv --out /kaggle/working/h400_cands.pkl")
+run('cd /content/work && python -u h400_eval.py --fix /kaggle/tmp/h400fix --s1 /content/work/val_queries_seed0.pkl --out /kaggle/working/h400_pub_ranks.csv ' + ' '.join(f'{os.path.basename(p)[:-4]}={p}' for p in L if pd.read_csv(p, nrows=1).columns[:2].tolist() == ['molecule_id', 'smiles']))
+'''
+def h400c_kernel(slug):
+    cells = [code(INFER_SETUP), code(H400_UNPACK)] + script_cells(['fpmodel.py', 'build_train_cache.py', 'fragscore.py', 'analog.py', 'derive.py', 'infer_fp.py', 'h400_eval.py']) + [code(H400C_CMD)]
+    write_kernel(os.path.join(S, 'k_' + slug), 'casmi26-' + slug, 'casmi26-' + slug, cells, gpu=False,
+                 kernel_sources=['satyajeetrai/casmi26-cpu-prep-cache-pools-baseline', 'satyajeetrai/casmi26-train-fp', 'satyajeetrai/casmi26-pop', 'satyajeetrai/casmi26-h400-base'],
+                 dataset_sources=DS + ['dmitriigluzdov/casmi26-pubchem-popularity-prior'])
+h400c_kernel('h400-cands')
