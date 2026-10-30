@@ -1,0 +1,11 @@
+# Fix (satyajeetrai): late-binding closure bug in the observation hooks. The V1FE.run and compute_channels wrappers
+# called the variable `original`, which later loops rebind (to spectra.search_shift / fit_pv_rankers).
+_h=_code/'decision_public_hooks.py';_t=_h.read_text()
+_NL=chr(10)
+for _a,_b in [('def run(self,observed,target,*args,**kwargs):','def run(self,observed,target,*args,_orig=original,**kwargs):'),
+              ('result=original(self,observed,target,*args,**kwargs)','result=_orig(self,observed,target,*args,**kwargs)'),
+              ('def channels(*args,**kwargs):'+_NL+'        result=original(*args,**kwargs)',
+               'def channels(*args,_orig=original,**kwargs):'+_NL+'        result=_orig(*args,**kwargs)')]:
+    assert _t.count(_a)==1,_a
+    _t=_t.replace(_a,_b)
+_h.write_text(_t);print('hooks closure fix applied',flush=True)
